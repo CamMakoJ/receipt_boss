@@ -1,0 +1,17 @@
+{
+  "name": "receipt-boss",
+  "version": "0.1.0",
+  "description": "Self-hosted, offline-capable receipt tracker with project reports",
+  "type": "module",
+  "private": true,
+  "engines": { "node": ">=22.13" },
+  "scripts": {
+    "start": "node --no-warnings server/index.js",
+    "test": "node --no-warnings --test test/api.test.js"
+  },
+  "dependencies": {
+    "archiver": "^7.0.1",
+    "express": "^4.21.2",
+    "pdfkit": "^0.16.0"
+  }
+}
