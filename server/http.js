@@ -19,8 +19,12 @@ export const dateStr = (v) => {
 };
 
 /** Accepts a data: URL or bare base64 JPEG/PNG and returns a Buffer. */
+export const MAX_IMAGE_BYTES = 15 * 1024 * 1024;
 export function decodeImage(b64) {
-  const buf = Buffer.from(String(b64).replace(/^data:[^,]*,/, ''), 'base64');
+  const text = String(b64).replace(/^data:[^,]*,/, '');
+  if (text.length > MAX_IMAGE_BYTES * 1.4) throw err(413, 'photo is too large (15 MB max)');   // before decoding: don't allocate for a huge string
+  const buf = Buffer.from(text, 'base64');
+  if (buf.length > MAX_IMAGE_BYTES) throw err(413, 'photo is too large (15 MB max)');
   const jpeg = buf[0] === 0xff && buf[1] === 0xd8;
   const png = buf.subarray(0, 4).toString('hex') === '89504e47';
   if (!jpeg && !png) throw err(400, 'image must be JPEG or PNG');
@@ -28,7 +32,7 @@ export function decodeImage(b64) {
 }
 export function saveImage(buf) {
   const name = crypto.randomUUID() + '.jpg';
-  fs.writeFileSync(path.join(IMAGE_DIR, name), buf);
+  fs.writeFileSync(path.join(IMAGE_DIR, name), buf, { mode: 0o600 });
   return name;
 }
 export const rmImage = (name) => { if (name) fs.rmSync(path.join(IMAGE_DIR, name), { force: true }); };

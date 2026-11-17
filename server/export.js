@@ -1,5 +1,5 @@
 import PDFDocument from 'pdfkit';
-import archiver from 'archiver';
+import { buildZip } from './zip.js';
 import { imageFile } from './http.js';
 import { calcTax } from './tax.js';
 import { total, sumReceipts, money, plain, csvCell, imageName, slug } from './util.js';
@@ -192,13 +192,16 @@ export function buildPdf(project, receipts, { from, to, invoice } = {}) {
 export async function streamZip(res, project, receipts, opts) {
   const base = `${slug(project.name) || 'project'}_receipts`;
   const pdf = await buildPdf(project, receipts, opts);
-  const zip = archiver('zip', { zlib: { level: 6 } });
+  const entries = [
+    { name: `${base}/report.pdf`, buffer: pdf },
+    { name: `${base}/report.csv`, buffer: Buffer.from(buildCsv(project, receipts)) },
+  ];
+  for (const r of receipts) filesOf(r).forEach((f, n) => entries.push({ name: `${base}/receipts/${imageName(r, n + 1)}`, file: imageFile(f), compress: false }));   // JPEGs are stored, not re-compressed
   res.setHeader('Content-Type', 'application/zip');
   res.setHeader('Content-Disposition', `attachment; filename="${base}.zip"`);
-  zip.on('error', (e) => res.destroy(e));
-  zip.pipe(res);
-  zip.append(pdf, { name: `${base}/report.pdf` });
-  zip.append(buildCsv(project, receipts), { name: `${base}/report.csv` });
-  for (const r of receipts) filesOf(r).forEach((f, n) => zip.file(imageFile(f), { name: `${base}/receipts/${imageName(r, n + 1)}` }));
-  await zip.finalize();
+  await new Promise((resolve, reject) => {
+    const out = buildZip(entries);
+    out.on('error', reject); res.on('error', reject); res.on('close', resolve); res.on('finish', resolve);
+    out.pipe(res);
+  });
 }

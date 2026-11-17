@@ -5,10 +5,21 @@ import path from 'node:path';
 export const DATA_DIR = path.resolve(process.env.DATA_DIR || 'data');
 export const IMAGE_DIR = path.join(DATA_DIR, 'images');
 export const BACKUP_DIR = path.join(DATA_DIR, 'backups');
-fs.mkdirSync(IMAGE_DIR, { recursive: true });
+// Everything here is private: receipts, photos, password hashes, backups. Owner-only permissions (best effort on non-POSIX systems).
+for (const dir of [DATA_DIR, IMAGE_DIR]) {
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  try { fs.chmodSync(dir, 0o700); } catch { /* not supported / not owner */ }
+}
 
-export const db = new DatabaseSync(path.join(DATA_DIR, 'receipts.db'));
-db.exec('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;');
+export const DB_PATH = path.join(DATA_DIR, 'receipts.db');
+export const db = new DatabaseSync(DB_PATH);
+db.exec(`
+  PRAGMA journal_mode = WAL;
+  PRAGMA foreign_keys = ON;
+  PRAGMA busy_timeout = 5000;      -- wait for a lock instead of failing (backups and requests overlap)
+  PRAGMA synchronous = NORMAL;     -- safe with WAL; far fewer fsyncs
+`);
+for (const ext of ['', '-wal', '-shm']) { try { fs.chmodSync(DB_PATH + ext, 0o600); } catch { /* file may not exist yet */ } }
 
 // ---- v1 schema (original release)
 db.exec(`
@@ -101,12 +112,56 @@ if (version() < 4) {
   } catch (e) { db.exec('ROLLBACK'); throw e; }
 }
 
+if (version() < 5) {
+  db.exec('BEGIN');
+  try {
+    db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_receipts_project_draft ON receipts(project_id, draft, number);
+      CREATE INDEX IF NOT EXISTS idx_receipts_date ON receipts(date);                       -- duplicate lookups
+      CREATE INDEX IF NOT EXISTS idx_receipts_pending ON receipts(check_status) WHERE check_status = 'pending';
+      CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at);
+      CREATE INDEX IF NOT EXISTS idx_items_date ON items(purchase_date);
+    `);
+    db.exec('PRAGMA user_version = 5');
+    db.exec('COMMIT');
+  } catch (e) { db.exec('ROLLBACK'); throw e; }
+}
+
+// Side effects on files must follow the database outcome: delete files only after COMMIT, discard new files on ROLLBACK.
+let txDepth = 0, commitHooks = [], rollbackHooks = [];
+export const afterCommit = (fn) => (txDepth ? commitHooks.push(fn) : fn());
+export const onRollback = (fn) => { if (txDepth) rollbackHooks.push(fn); };
+const run = (hooks) => hooks.forEach((h) => { try { h(); } catch { /* best-effort cleanup */ } });
+
 export function tx(fn) {
   db.exec('BEGIN IMMEDIATE');
-  try { const r = fn(); db.exec('COMMIT'); return r; }
-  catch (e) { db.exec('ROLLBACK'); throw e; }
+  txDepth++;
+  try {
+    const r = fn();
+    db.exec('COMMIT');
+    txDepth--; const hooks = commitHooks; commitHooks = []; rollbackHooks = [];
+    run(hooks);
+    return r;
+  } catch (e) {
+    txDepth--; const hooks = rollbackHooks; commitHooks = []; rollbackHooks = [];
+    try { db.exec('ROLLBACK'); } catch { /* already rolled back */ }
+    run(hooks);
+    throw e;
+  }
 }
 
 export const getSetting = (key, fallback = '') => db.prepare('SELECT value FROM settings WHERE key = ?').get(key)?.value ?? fallback;
 export const setSetting = (key, value) =>
   db.prepare('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value').run(key, String(value));
+
+/** 'ok' or a description of the problem. quick_check is fast enough to run at every start. */
+export const quickCheck = () => db.prepare('PRAGMA quick_check').all().map((r) => Object.values(r)[0]).join('; ');
+
+/** Flush the write-ahead log into the main file and let SQLite refresh its query statistics. */
+export function maintain() {
+  db.exec('PRAGMA optimize');
+  db.exec('PRAGMA wal_checkpoint(PASSIVE)');
+}
+export function closeDb() {
+  try { db.exec('PRAGMA wal_checkpoint(TRUNCATE)'); db.close(); } catch { /* already closed */ }
+}

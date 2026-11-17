@@ -117,7 +117,7 @@ test('exports include every photo: zip names, PDF pages, CSV column', async () =
   assert.match(csv, /receipts\/001_Two-pages\.jpg; receipts\/001_Two-pages_2\.jpg/);
 });
 
-test('migration: a v3 database (single image per receipt/item) becomes photo rows', () => {
+test('migration: a v3 database (single image per receipt/item) is upgraded to v5 with photo rows and indexes', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rb-mig-'));
   const dbPath = path.join(dir, 'receipts.db');
   // build a v4 database with the normal code, then rewind it to what v3 looked like
@@ -125,19 +125,21 @@ test('migration: a v3 database (single image per receipt/item) becomes photo row
     db.exec("INSERT INTO users (username, password_hash) VALUES ('u','x'); INSERT INTO projects (user_id, name) VALUES (1,'P');");
     db.exec("INSERT INTO receipts (project_id, number, date, image) VALUES (1,1,'2026-01-01','a.jpg'), (1,2,'2026-01-02',NULL);");
     db.exec("INSERT INTO items (name, purchase_date, image) VALUES ('Fridge','2025-01-01','b.jpg');");
-    db.exec('DROP TABLE receipt_photos; DROP TABLE item_photos; ALTER TABLE receipts DROP COLUMN draft; PRAGMA user_version = 3;'); db.close();
+    db.exec('DROP INDEX idx_receipts_project_draft; DROP TABLE receipt_photos; DROP TABLE item_photos; ALTER TABLE receipts DROP COLUMN draft; PRAGMA user_version = 3;'); db.close();
   });`;
   execFileSync('node', ['--no-warnings', '-e', build], { env: { ...process.env, DATA_DIR: dir } });
   const check = `import('${new URL('../server/db.js', import.meta.url).href}').then(({ db }) => {
     console.log(JSON.stringify({ v: db.prepare('PRAGMA user_version').get().user_version,
       rp: db.prepare('SELECT receipt_id, file, position FROM receipt_photos').all(), ip: db.prepare('SELECT item_id, file FROM item_photos').all(),
-      draft: db.prepare('SELECT draft FROM receipts').all().map((r) => r.draft) }));
+      draft: db.prepare('SELECT draft FROM receipts').all().map((r) => r.draft),
+      indexes: db.prepare("SELECT name FROM sqlite_master WHERE type = 'index'").all().map((r) => r.name) }));
   });`;
   const out = JSON.parse(execFileSync('node', ['--no-warnings', '-e', check], { env: { ...process.env, DATA_DIR: dir } }).toString());
-  assert.equal(out.v, 4);
+  assert.equal(out.v, 5);
   assert.deepEqual(out.rp.map((r) => ({ ...r })), [{ receipt_id: 1, file: 'a.jpg', position: 0 }]);
   assert.deepEqual(out.ip.map((r) => ({ ...r })), [{ item_id: 1, file: 'b.jpg' }]);
   assert.deepEqual(out.draft, [0, 0]);
+  assert.ok(out.indexes.includes('idx_receipts_project_draft') && out.indexes.includes('idx_sessions_expires'));
 });
 
 test('adding a page appends its scanned text instead of replacing the earlier text', async () => {

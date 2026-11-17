@@ -5,9 +5,9 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import AdmZip from 'adm-zip';
 import { DatabaseSync } from 'node:sqlite';
-import { start, stop, client, adminClient, img, DATA_DIR } from './helper.js';
+import { start, stop, client, adminClient, img, DATA_DIR, zipNames, zipRead } from './helper.js';
+import { listEntries } from '../server/zip.js';
 import { encryptFile, decryptFile, looksEncrypted } from '../server/crypto-backup.js';
 
 before(start); after(stop);
@@ -74,19 +74,20 @@ test('encrypted backups: settings, run, verify, download, passphrase never leaks
   assert.equal(run.status, 200, JSON.stringify(run.body)); assert.match(run.body.message, /\(encrypted\)/);
   const name = run.body.files[0].name; assert.match(name, /\.zip\.enc$/);
   const file = path.join(DATA_DIR, 'backups', name);
-  assert.throws(() => new AdmZip(file).getEntries());                                                         // not a zip: it's ciphertext
+  await assert.rejects(listEntries(file));                                                                    // not a zip: it's ciphertext
   assert.equal(fs.readFileSync(file).includes('Private purchase'), false);
   const zipOut = path.join(tmp, 'dec.zip'); await decryptFile(file, zipOut, PASS);
-  const zip = new AdmZip(zipOut), names = zip.getEntries().map((e) => e.entryName);
+  const names = await zipNames(zipOut);
   assert.ok(names.includes('receipts.db') && names.filter((n) => n.startsWith('images/') && n.length > 7).length === 2);
-  fs.writeFileSync(path.join(tmp, 'snap.db'), zip.getEntry('receipts.db').getData());
+  fs.writeFileSync(path.join(tmp, 'snap.db'), await zipRead(zipOut, 'receipts.db'));
   const snap = new DatabaseSync(path.join(tmp, 'snap.db'));
   assert.equal(snap.prepare("SELECT COUNT(*) n FROM settings WHERE key IN ('backup.passphrase','ai.api_key')").get().n, 0);
   assert.equal(snap.prepare('SELECT COUNT(*) n FROM receipt_photos').get().n, 2);
   snap.close();
 
   // verify: right passphrase ok, wrong one refused
-  assert.deepEqual((await c.post('/api/backup/verify', { passphrase: PASS })).body, { ok: true, name });
+  const ver = (await c.post('/api/backup/verify', { passphrase: PASS })).body;
+  assert.deepEqual([ver.ok, ver.name, ver.info.encrypted, ver.info.counts.receipts, ver.info.images], [true, name, true, 1, 2]);
   const wrong = await c.post('/api/backup/verify', { passphrase: 'not the passphrase' });
   assert.equal(wrong.status, 400); assert.match(wrong.body.error, /wrong passphrase/);
 
@@ -103,7 +104,7 @@ test('encrypted backups: settings, run, verify, download, passphrase never leaks
   assert.notEqual(badRun.status, 0); assert.match(badRun.stderr, /Could not decrypt: wrong passphrase/);
   assert.equal(fs.existsSync(path.join(fresh, 'receipts.db')), false);                                        // nothing touched
   const good = spawnSync('node', ['--no-warnings', 'scripts/restore.js', file], { env: { ...process.env, DATA_DIR: fresh, RB_BACKUP_PASSPHRASE: PASS }, encoding: 'utf8' });
-  assert.equal(good.status, 0, good.stderr); assert.match(good.stdout, /Restored database and 2 image/);
+  assert.equal(good.status, 0, good.stderr); assert.match(good.stdout, /Restored the database and 2 photo/);
   const restored = new DatabaseSync(path.join(fresh, 'receipts.db'));
   assert.equal(restored.prepare("SELECT description FROM receipts").get().description, 'Private purchase');
   restored.close();

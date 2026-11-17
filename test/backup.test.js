@@ -5,8 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { DatabaseSync } from 'node:sqlite';
-import AdmZip from 'adm-zip';
-import { start, stop, adminClient, img, DATA_DIR } from './helper.js';
+import { start, stop, adminClient, img, DATA_DIR, zipNames, zipRead } from './helper.js';
 
 before(start); after(stop);
 
@@ -21,6 +20,7 @@ case "$cmd" in
   copyto) mkdir -p "$(dirname "$(p "$2")")"; cp "$1" "$(p "$2")" ;;
   lsf) ls "$(p "$2")" ;;
   deletefile) rm "$(p "$1")" ;;
+  size) f="$(p "$2")"; if [ -f "$f" ]; then printf '{"count":1,"bytes":%s}\n' "$(wc -c < "$f")"; else printf '{"count":0,"bytes":0}\n'; fi ;;
   *) echo "unexpected $cmd" >&2; exit 2 ;;
 esac
 `, { mode: 0o755 });
@@ -45,7 +45,8 @@ test('backup run: local zip, folder copy, rclone upload, retention; then restore
     assert.equal(last.status, 200, JSON.stringify(last.body));
     await new Promise((r) => setTimeout(r, 1100)); // names carry second-resolution timestamps
   }
-  assert.match(last.body.message, /uploaded to gdrive:ReceiptBoss/);
+  assert.match(last.body.message, /uploaded to gdrive:ReceiptBoss \(size confirmed\)/);
+  assert.match(last.body.message, /verified \(1 receipts, 1 items, 2 photos\)/);
   // retention keeps only the newest 2 in all three places
   assert.equal(last.body.files.length, 2);
   assert.equal(fs.readdirSync(copyDir).length, 2);
@@ -53,12 +54,11 @@ test('backup run: local zip, folder copy, rclone upload, retention; then restore
 
   // backup contents: db snapshot with no sessions, both images, manifest
   const file = path.join(DATA_DIR, 'backups', last.body.files[0].name);
-  const zip = new AdmZip(file);
-  const names = zip.getEntries().map((e) => e.entryName);
+  const names = await zipNames(file);
   assert.ok(names.includes('receipts.db') && names.includes('manifest.json'));
   assert.equal(names.filter((n) => n.startsWith('images/') && n.length > 7).length, 2);
   const snapDir = fs.mkdtempSync(path.join(tmp, 'snap-'));
-  fs.writeFileSync(path.join(snapDir, 'x.db'), zip.getEntry('receipts.db').getData());
+  fs.writeFileSync(path.join(snapDir, 'x.db'), await zipRead(file, 'receipts.db'));
   const snap = new DatabaseSync(path.join(snapDir, 'x.db'));
   assert.equal(snap.prepare('SELECT COUNT(*) n FROM sessions').get().n, 0);
   assert.equal(snap.prepare('SELECT COUNT(*) n FROM receipts').get().n, 1);
@@ -81,7 +81,7 @@ test('backup run: local zip, folder copy, rclone upload, retention; then restore
   // restore into a brand new data dir with the CLI
   const fresh = path.join(tmp, 'restored');
   const out = execFileSync('node', ['--no-warnings', 'scripts/restore.js', file], { env: { ...process.env, DATA_DIR: fresh } }).toString();
-  assert.match(out, /Restored database and 2 image/);
+  assert.match(out, /Restored the database and 2 photo/);
   const db2 = new DatabaseSync(path.join(fresh, 'receipts.db'));
   assert.equal(db2.prepare("SELECT description FROM receipts").get().description, 'one');
   assert.equal(db2.prepare('SELECT COUNT(*) n FROM users').get().n, 1);

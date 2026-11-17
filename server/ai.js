@@ -247,6 +247,7 @@ export function registerAi(app, { getReceipt }) {
     const b = req.body || {};
     const base = String(b.base_url ?? '').trim();
     if (base && !/^https?:\/\/[^\s]+$/i.test(base)) throw err(400, 'AI server address must start with http:// or https://');
+    if (/^https?:\/\/(169\.254\.|\[?fe80:|metadata\.google\.internal|0\.0\.0\.0)/i.test(base)) throw err(400, 'that address is not allowed for the AI server');   // link-local / cloud metadata
     const timeout = Number(b.timeout_s ?? 120);
     if (!(timeout >= 5 && timeout <= 1800)) throw err(400, 'timeout must be 5-1800 seconds');
     setSetting('ai.enabled', b.enabled ? '1' : '0');

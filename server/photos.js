@@ -1,5 +1,5 @@
 // Several photos per receipt / household item. receipts.image / items.image always mirror the first photo ("cover").
-import { db } from './db.js';
+import { db, afterCommit, onRollback } from './db.js';
 import { err, decodeImage, saveImage, rmImage, imageFile } from './http.js';
 
 export const MAX_PHOTOS = 12;
@@ -74,7 +74,8 @@ export function applyPhotoChanges(kind, id, body, { create = false } = {}) {
     for (const f of savedFiles) db.prepare(`INSERT INTO ${k.table} (${k.fk}, file, position) VALUES (?, ?, ?)`).run(id, f, pos++);
     syncCover(kind, id);
   } catch (e) { savedFiles.forEach(rmImage); throw e; }
-  existing.filter((p) => removeIds.has(p.id)).forEach((p) => rmImage(p.file));   // files go only after the DB is updated
+  onRollback(() => savedFiles.forEach(rmImage));                                   // inside a transaction that later fails: drop the new files
+  existing.filter((p) => removeIds.has(p.id)).forEach((p) => afterCommit(() => rmImage(p.file)));   // old files go only once the DB change is committed
   return true;
 }
 

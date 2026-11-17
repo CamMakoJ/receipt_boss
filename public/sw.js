@@ -1,7 +1,10 @@
 // Offline support: app shell is cached; API reads fall back to the last good response.
-const VERSION = 'v7';
+const VERSION = 'v8';
 const SHELL = `shell-${VERSION}`, DATA = `data-${VERSION}`, VENDOR = 'vendor-v1'; // OCR engine (~15 MB) survives app updates
-const SHELL_FILES = ['/', '/app.js', '/crop.js', '/warp.js', '/filters.js', '/vendor.js', '/ocr.js', '/ocr-parse.js', '/style.css', '/manifest.webmanifest', '/icon.svg'];
+const SHELL_FILES = ['/', '/app.js', '/style.css', '/theme-init.js', '/manifest.webmanifest', '/icon.svg',
+  '/crop.js', '/warp.js', '/filters.js', '/vendor.js', '/ocr.js', '/ocr-parse.js',
+  '/ui/core.js', '/ui/theme.js', '/ui/dialogs.js', '/ui/queue.js', '/ui/photos.js', '/ui/forms.js', '/ui/rows.js', '/ui/search.js',
+  '/ui/projects.js', '/ui/receipt.js', '/ui/household.js', '/ui/capture.js', '/ui/settings.js'];
 
 self.addEventListener('install', (e) => {
   e.waitUntil(caches.open(SHELL).then((c) => c.addAll(SHELL_FILES)).then(() => self.skipWaiting()));

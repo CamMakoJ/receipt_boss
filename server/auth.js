@@ -7,6 +7,10 @@ const scrypt = promisify(crypto.scrypt);
 const COOKIE = 'rb_session';
 const SESSION_MS = 30 * 24 * 3600 * 1000;
 const SCRYPT = { N: 16384, r: 8, p: 1 };
+const MAX_SESSIONS = 20;
+
+/** Expired sessions would otherwise accumulate forever. */
+export const purgeSessions = () => db.prepare('DELETE FROM sessions WHERE expires_at < ?').run(Date.now()).changes;
 
 // ---------------------------------------------------------------- passwords
 export async function hashPassword(pw) {
@@ -45,6 +49,9 @@ function startSession(req, res, userId) {
   const token = crypto.randomBytes(32).toString('base64url');
   const now = Date.now();
   db.prepare('INSERT INTO sessions (token_hash, user_id, expires_at, created_at) VALUES (?,?,?,?)').run(sha(token), userId, now + SESSION_MS, now);
+  // at most MAX_SESSIONS devices per account: the oldest sign-ins are dropped
+  db.prepare(`DELETE FROM sessions WHERE user_id = ? AND token_hash NOT IN
+    (SELECT token_hash FROM sessions WHERE user_id = ? ORDER BY created_at DESC LIMIT ?)`).run(userId, userId, MAX_SESSIONS);
   setCookie(req, res, token, SESSION_MS / 1000);
 }
 
@@ -73,9 +80,11 @@ function throttle(key) {
   const f = fails.get(key);
   if (f && f.until > Date.now()) throw err(429, `Too many attempts. Try again in ${Math.ceil((f.until - Date.now()) / 1000)}s`);
 }
+setInterval(() => { const now = Date.now(); for (const [k, f] of fails) if (f.until < now - 3600e3 && f.last < now - 3600e3) fails.delete(k); }, 600e3).unref();
 function failed(key) {
-  const f = fails.get(key) || { n: 0, until: 0 };
-  f.n++;
+  if (fails.size > 10000) fails.clear();                       // memory bound
+  const f = fails.get(key) || { n: 0, until: 0, last: 0 };
+  f.n++; f.last = Date.now();
   if (f.n >= 5) f.until = Date.now() + Math.min(15 * 60e3, 30e3 * 2 ** (f.n - 5));
   fails.set(key, f);
 }

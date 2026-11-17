@@ -106,12 +106,12 @@ export async function openCropper(file) {
     <div class="crop-bar"><b>Outline the receipt</b><span class="muted" id="crophint">drag the 4 corners onto the receipt's corners</span></div>
     <div class="crop-stage"><canvas></canvas></div>
     <div class="crop-bar crop-actions">
-      <button type="button" data-a="cancel">Cancel</button>
-      <button type="button" data-a="ccw" title="Rotate left">⟲</button>
-      <button type="button" data-a="cw" title="Rotate right">⟳</button>
-      <button type="button" data-a="auto">Auto</button>
-      <button type="button" data-a="full">Reset</button>
-      <button type="button" data-a="done" class="pri">Done ✓</button>
+      <button type="button" class="btn" data-a="cancel">Cancel</button>
+      <button type="button" class="btn" data-a="ccw" title="Rotate left" aria-label="Rotate left">⟲</button>
+      <button type="button" class="btn" data-a="cw" title="Rotate right" aria-label="Rotate right">⟳</button>
+      <button type="button" class="btn" data-a="auto">Auto</button>
+      <button type="button" class="btn" data-a="full">Reset</button>
+      <button type="button" class="btn primary" data-a="done">Done</button>
     </div>`;
   document.body.appendChild(root);
   document.body.classList.add('no-scroll');

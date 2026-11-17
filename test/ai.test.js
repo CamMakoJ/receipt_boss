@@ -4,9 +4,8 @@ import http from 'node:http';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import AdmZip from 'adm-zip';
 import { DatabaseSync } from 'node:sqlite';
-import { start, stop, client, adminClient, img } from './helper.js';
+import { start, stop, client, adminClient, img, zipRead } from './helper.js';
 import { checkIdle, compareReceipt, rulesCheck, extractJson, sanitizeFilters, normalizeRead } from '../server/ai.js';
 import { createBackup } from '../server/backup.js';
 
@@ -101,7 +100,7 @@ test('backup snapshots never contain the AI key', async () => {
   const dest = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'rb-aibk-')), 'b.zip');
   await createBackup(dest);
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rb-aibk2-'));
-  fs.writeFileSync(path.join(dir, 'x.db'), new AdmZip(dest).getEntry('receipts.db').getData());
+  fs.writeFileSync(path.join(dir, 'x.db'), await zipRead(dest, 'receipts.db'));
   const snap = new DatabaseSync(path.join(dir, 'x.db'));
   assert.equal(snap.prepare("SELECT COUNT(*) n FROM settings WHERE key = 'ai.api_key'").get().n, 0);
   assert.equal(snap.prepare("SELECT value FROM settings WHERE key = 'ai.model'").get().value, 'fake-vl');   // other AI settings are kept

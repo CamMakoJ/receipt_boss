@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { listEntries, readEntry } from '../server/zip.js';
 
 export const DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'rb-test-'));
 process.env.DATA_DIR = DATA_DIR;
@@ -46,3 +47,7 @@ export async function adminClient(name = 'admin', pw = 'correct-horse-battery') 
   else await c.post('/api/auth/login', { username: name, password: pw });
   return c;
 }
+
+/** Zip inspection for tests (same streaming, CRC-checked reader the server uses). */
+export const zipNames = async (file) => (await listEntries(file)).map((e) => e.name);
+export const zipRead = (file, name) => readEntry(file, name, 256 * 1024 * 1024);

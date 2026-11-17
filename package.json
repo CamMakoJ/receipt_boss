@@ -10,14 +10,16 @@
   "scripts": {
     "start": "node --no-warnings server/index.js",
     "test": "node --no-warnings --test test/*.test.js",
-    "postinstall": "node scripts/vendor-ocr.js"
+    "postinstall": "node scripts/vendor-ocr.js",
+    "test:e2e": "node --no-warnings test/e2e/run.mjs"
   },
   "dependencies": {
     "@tesseract.js-data/eng": "^1.0.0",
-    "adm-zip": "^0.5.16",
-    "archiver": "^7.0.1",
+    "compression": "^1.8.2",
     "express": "^4.21.2",
     "pdfkit": "^0.16.0",
-    "tesseract.js": "^7.0.0"
+    "tesseract.js": "^7.0.0",
+    "yauzl": "^3.4.0",
+    "yazl": "^3.3.1"
   }
 }
