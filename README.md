@@ -9,6 +9,7 @@ Self-hosted receipt tracker. Runs on a machine on your LAN, used from phones/com
 - **Per receipt:** date, vendor, **province**, **category**, description, subtotal, **GST/HST**, **PST/QST**, tip (kept separate), photo.
   - **Auto-calculated taxes** from subtotal + the receipt's province (all 13 provinces/territories; HST provinces put the HST in the GST/HST box). Tips are never taxed. Type your own tax amount any time and auto-calc switches off for that receipt.
   - **Category → description:** pick a category (or type your own) and the description fills in with it; edit the description and it stays yours. Blank descriptions default to the category.
+- **Photo → crop → read.** Taking or choosing a photo opens a full-screen **crop screen** (auto-framed around the receipt; drag corners/edges, rotate, Reset, Auto). **Done** then reads the receipt text and **pre-fills** vendor, date, province (from the postal code), category (from the vendor), subtotal, GST/HST, PST/QST and tip. Filled fields are highlighted yellow for you to check; if a figure couldn't be read clearly but the total pins it down, it is filled from the total and called out by name. Reading runs **on your device** (Tesseract in WebAssembly, served by this app) — no image or text is sent anywhere, and it works offline. Household items get date, vendor and price. Switch auto-reading off with the checkbox under the photo buttons; **🔍 Read text** re-runs it on the current photo.
 - **Report export** per project (optional date range): PDF (summary, billable and non-billable tables with province & category, then one page per receipt image) + CSV + `receipts/001_description.jpg` — all in one zip, or PDF/CSV separately.
   - *Auto-calculate missing GST/PST* option (on by default): receipts saved with **no** tax get an estimate from their own province, marked `*` in the PDF and "Tax estimated = Yes" in the CSV. Nothing is changed in the database.
 - **Household items & warranties** (TV, fridge, laptop…): item, purchase date, price, vendor, serial, receipt photo, and warranty length (months/years, or unknown). Shows warranty end date and groups into *ending soon (90 days) / under warranty / unknown / expired*. Shared by everyone on the server. CSV export.
@@ -32,6 +33,8 @@ HOST=0.0.0.0 TLS_CERT=... TLS_KEY=... npm start
 | `DATA_DIR` | `./data` | database + images + local backups |
 | `TRUST_PROXY` | – | `1` if behind a reverse proxy that terminates TLS (so cookies get `Secure`) |
 | `RCLONE_BIN` | `rclone` | path to rclone |
+
+`npm install` also copies the OCR engine and English model into `public/vendor/tesseract/` (~15 MB, git-ignored; the browser downloads only ~7 MB of it, once, on the first scan and caches it). If that step was skipped, run `node scripts/vendor-ocr.js`; without it the app still works, just without auto-reading.
 
 Open the URL, create the admin account, then add family under **⚙ Settings → Users**. A sample systemd unit is in `deploy/receipt-boss.service`.
 
@@ -78,6 +81,8 @@ Current data is moved to `pre-restore-<timestamp>/` inside `DATA_DIR`, not delet
 Open the app once while online. Then, offline you can browse what you've already viewed and **add receipts and household items** (queued, shown as "Waiting to sync"). You can't edit/delete existing records, create projects, change settings or export until you're back online. Queued items are tied to the signed-in user. Syncing is idempotent (no duplicates on retry). Receipt numbers are assigned by the server when a receipt syncs.
 
 ## Notes & limits
+
+- **Receipt reading is best-effort.** It is English-only, works best on a flat, well-lit, tightly cropped photo, and can't read handwriting (a handwritten tip is entered by hand). It sometimes misreads a digit — that's why filled fields are highlighted, and why it never saves anything for you. The first scan on a device takes a few seconds longer while the engine loads.
 
 - **Tax rates** live in `server/tax.js` (current standard rates; NS is 14% HST). Auto-calc applies the *standard* rate to the whole subtotal — it doesn't know about exemptions (e.g. BC PST on restaurant meals, zero-rated groceries). Override the amounts when a receipt shows something different; the printed receipt always wins.
 - Money is stored as integer cents. Receipt numbers are per project and never reused.

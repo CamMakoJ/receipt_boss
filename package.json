@@ -9,12 +9,15 @@
   },
   "scripts": {
     "start": "node --no-warnings server/index.js",
-    "test": "node --no-warnings --test test/*.test.js"
+    "test": "node --no-warnings --test test/*.test.js",
+    "postinstall": "node scripts/vendor-ocr.js"
   },
   "dependencies": {
+    "@tesseract.js-data/eng": "^1.0.0",
     "adm-zip": "^0.5.16",
     "archiver": "^7.0.1",
     "express": "^4.21.2",
-    "pdfkit": "^0.16.0"
+    "pdfkit": "^0.16.0",
+    "tesseract.js": "^7.0.0"
   }
 }

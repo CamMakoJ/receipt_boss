@@ -1,13 +1,13 @@
 // Offline support: app shell is cached; API reads fall back to the last good response.
-const VERSION = 'v2';
-const SHELL = `shell-${VERSION}`, DATA = `data-${VERSION}`;
-const SHELL_FILES = ['/', '/app.js', '/style.css', '/manifest.webmanifest', '/icon.svg'];
+const VERSION = 'v3';
+const SHELL = `shell-${VERSION}`, DATA = `data-${VERSION}`, VENDOR = 'vendor-v1'; // OCR engine (~15 MB) survives app updates
+const SHELL_FILES = ['/', '/app.js', '/crop.js', '/ocr.js', '/ocr-parse.js', '/style.css', '/manifest.webmanifest', '/icon.svg'];
 
 self.addEventListener('install', (e) => {
   e.waitUntil(caches.open(SHELL).then((c) => c.addAll(SHELL_FILES)).then(() => self.skipWaiting()));
 });
 self.addEventListener('activate', (e) => {
-  e.waitUntil(caches.keys().then((ks) => Promise.all(ks.filter((k) => ![SHELL, DATA].includes(k)).map((k) => caches.delete(k))))
+  e.waitUntil(caches.keys().then((ks) => Promise.all(ks.filter((k) => ![SHELL, DATA, VENDOR].includes(k)).map((k) => caches.delete(k))))
     .then(() => self.clients.claim()));
 });
 
@@ -23,7 +23,7 @@ self.addEventListener('fetch', (e) => {
     e.respondWith(isImage ? cacheFirst(req, DATA) : networkFirst(req, DATA));
     return;
   }
-  e.respondWith(networkFirst(req, SHELL, '/'));
+  e.respondWith(url.pathname.startsWith('/vendor/') ? cacheFirst(req, VENDOR) : networkFirst(req, SHELL, '/'));
 });
 
 async function networkFirst(req, cacheName, fallbackUrl) {

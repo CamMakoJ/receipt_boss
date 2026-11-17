@@ -1,4 +1,7 @@
 // Receipt Boss front-end: vanilla JS, no build step.
+import { openCropper } from './crop.js';
+import { scanCanvas, cancelScan, warmOcr } from './ocr.js';
+import { parseReceiptText, resolveAmounts } from './ocr-parse.js';
 const $ = (s, el = document) => el.querySelector(s);
 const app = $('#app');
 
@@ -89,46 +92,73 @@ function renderNet() { $('#net').textContent = navigator.onLine ? '' : '● offl
 addEventListener('online', () => { renderNet(); flushQueue(); });
 addEventListener('offline', renderNet);
 
-// ------------------------------------------------------------------ image handling
-/** Resize + re-encode as JPEG in the browser (also converts HEIC where the browser can decode it). */
-async function toJpegDataUrl(file, maxDim = 2200, quality = 0.85) {
-  let bmp;
-  try { bmp = await createImageBitmap(file, { imageOrientation: 'from-image' }); }
-  catch {
-    bmp = await new Promise((resolve, reject) => {
-      const img = new Image();
-      img.onload = () => resolve(img); img.onerror = () => reject(new Error('Could not read that image'));
-      img.src = URL.createObjectURL(file);
-    });
-  }
-  const w = bmp.width || bmp.naturalWidth, h = bmp.height || bmp.naturalHeight;
-  const k = Math.min(1, maxDim / Math.max(w, h));
-  const c = document.createElement('canvas');
-  c.width = Math.round(w * k); c.height = Math.round(h * k);
-  const ctx = c.getContext('2d');
-  ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, c.width, c.height);
-  ctx.drawImage(bmp, 0, 0, c.width, c.height);
-  return c.toDataURL('image/jpeg', quality);
-}
-/** Photo picker markup + wiring shared by receipt and item forms. Returns getters for the chosen image state. */
+// ------------------------------------------------------------------ photo -> crop -> OCR
+const ocrOn = () => localStorage.getItem('ocr-on') !== '0';
+
+/** Photo picker markup shared by receipt and item forms. */
 function photoField(existingSrc) {
   return `<label>Photo</label>
     <div class="row"><label class="btn pri" style="margin:0">📷 Take photo<input id="cam" type="file" accept="image/*" capture="environment" hidden></label>
       <label class="btn" style="margin:0">🖼 Choose file<input id="pick" type="file" accept="image/*" hidden></label>
+      <button type="button" id="rescan" hidden>🔍 Read text</button>
       ${existingSrc ? '<button type="button" id="rmimg" class="danger">Remove</button>' : ''}</div>
+    <label class="check"><input type="checkbox" id="ocrtoggle" ${ocrOn() ? 'checked' : ''}> Read the receipt automatically after cropping (on this device; nothing is uploaded for reading)</label>
+    <div id="scanmsg" class="scanmsg" hidden></div>
     <img id="prev" class="preview" ${existingSrc ? `src="${existingSrc}"` : 'hidden'} alt="">`;
 }
-function wirePhoto() {
-  const st = { data: null, remove: false };
+
+/** Full-screen "Reading receipt…" overlay with a skip button. */
+async function runScan(canvas, onText) {
+  const box = document.createElement('div');
+  box.className = 'scan-overlay';
+  box.innerHTML = '<div class="card"><div class="spinner"></div><b id="scanstat">Starting…</b><div class="bar"><i id="scanbar"></i></div><button type="button" id="scanskip">Skip</button></div>';
+  document.body.appendChild(box);
+  $('#scanskip', box).onclick = () => cancelScan();
+  const onProgress = (m) => {
+    const pct = Math.round((m.progress || 0) * 100);
+    $('#scanstat', box).textContent = m.status === 'recognizing text' ? `Reading receipt… ${pct}%` : /language|traineddata|loading/.test(m.status) ? 'Loading reader (first time only)…' : 'Preparing…';
+    $('#scanbar', box).style.width = (m.status === 'recognizing text' ? pct : 5) + '%';
+  };
+  try { onText(await scanCanvas(canvas, { onProgress })); return true; }
+  catch (e) { if (!e.cancelled) toast('Could not read the text on this photo — fill it in by hand', true); return false; }
+  finally { box.remove(); }
+}
+
+/**
+ * Wires the photo buttons: choose/take -> crop screen -> (optional) OCR -> onScan(text).
+ * Returns the state the form reads on save: { data (jpeg data URL | null), remove }.
+ */
+function wirePhoto(onScan) {
+  const st = { data: null, remove: false, canvas: null };
+  const scan = async () => { if (st.canvas && onScan) await runScan(st.canvas, onScan); };
   const onFile = async (ev) => {
-    const file = ev.target.files[0]; if (!file) return;
-    try { st.data = await toJpegDataUrl(file); st.remove = false; $('#prev').src = st.data; $('#prev').hidden = false; }
-    catch (e) { toast(e.message, true); }
-    ev.target.value = '';
+    const file = ev.target.files[0]; ev.target.value = '';
+    if (!file) return;
+    try {
+      const res = await openCropper(file);          // straight to the crop screen
+      if (!res) return;                              // cancelled: keep whatever photo was there before
+      Object.assign(st, { data: res.dataUrl, canvas: res.canvas, remove: false });
+      $('#prev').src = res.dataUrl; $('#prev').hidden = false;
+      if (onScan) $('#rescan').hidden = false;
+      if (onScan && ocrOn()) await scan();
+    } catch (e) { toast(e.message, true); }
   };
   $('#cam').onchange = onFile; $('#pick').onchange = onFile;
-  if ($('#rmimg')) $('#rmimg').onclick = () => { st.remove = true; st.data = null; $('#prev').hidden = true; };
+  $('#rescan').onclick = scan;
+  $('#ocrtoggle').onchange = (ev) => localStorage.setItem('ocr-on', ev.target.checked ? '1' : '0');
+  if ($('#rmimg')) $('#rmimg').onclick = () => { st.remove = true; st.data = null; st.canvas = null; $('#prev').hidden = true; $('#rescan').hidden = true; };
+  if (onScan && ocrOn()) warmOcr();                  // fetch the OCR engine in the background while online
   return st;
+}
+
+const showScanMsg = (html, warn = false) => { const el = $('#scanmsg'); el.innerHTML = html; el.className = 'scanmsg' + (warn ? ' warn' : ''); el.hidden = false; };
+/** Put a value in a field only if the user hasn't typed there (empty, a default, or an earlier scan). Marks it for review. */
+function scanFill(el, value, isDefault = false) {
+  if (value === null || value === undefined || value === '') return false;
+  if (el.value && !el.classList.contains('scanned') && !isDefault) return false;
+  el.value = value; el.classList.add('scanned');
+  el.addEventListener('input', () => el.classList.remove('scanned'), { once: true });
+  return true;
 }
 
 // ------------------------------------------------------------------ auth screens
@@ -331,7 +361,6 @@ async function viewReceiptForm({ projectId, receiptId }) {
     </form>`;
 
   const form = $('#f');
-  const photo = wirePhoto();
   const g = (n) => toCents(form[n].value);
   const recalc = () => { $('#tot').textContent = money(g('subtotal') + g('gst') + g('pst') + g('tip')); };
   const applyAuto = () => {
@@ -352,6 +381,30 @@ async function viewReceiptForm({ projectId, receiptId }) {
   let autoDesc = v.category, descCustom = !!v.description && v.description !== v.category;
   form.category.addEventListener('input', () => { if (!descCustom) { form.description.value = form.category.value; autoDesc = form.category.value; } });
   form.description.addEventListener('input', () => { descCustom = form.description.value !== '' && form.description.value !== autoDesc; });
+
+  // ---- OCR result -> form fields
+  const applyScan = (text) => {
+    const p = parseReceiptText(text);
+    if (p.province && meta.provinces[p.province]) form.province.value = p.province;
+    const a = resolveAmounts(p, meta.provinces[form.province.value]);
+    const filled = [];
+    const set = (label, ok) => { if (ok) filled.push(label); };
+    set('vendor', scanFill(form.vendor, p.vendor));
+    set('date', scanFill(form.date, p.date, form.date.value === today()));
+    if (p.category && !form.category.value) { form.category.value = p.category; form.category.classList.add('scanned'); form.category.dispatchEvent(new Event('input')); filled.push('category'); }
+    const readTax = p.gst !== null || p.pst !== null || p.tax !== null;
+    if (a.subtotal !== null && (!form.subtotal.value || form.subtotal.classList.contains('scanned'))) {
+      scanFill(form.subtotal, fromCents(a.subtotal));
+      $('#taxauto').checked = !readTax;                      // taxes read from the receipt are kept exactly as printed
+      scanFill(form.gst, fromCents(a.gst)); scanFill(form.pst, fromCents(a.pst));
+      filled.push('amounts', ...(readTax ? ['taxes'] : []));
+    }
+    if (a.tip !== null) set('tip', scanFill(form.tip, fromCents(a.tip)));
+    applyAuto();
+    if (!filled.length) return showScanMsg('Couldn’t pick out any details. Try cropping closer to the text, or use 🔍 Read text again.', true);
+    showScanMsg(`Filled from the photo: <b>${filled.join(', ')}</b>. Please check the highlighted fields${a.estimated ? ` — <b>${a.inferred.map((k) => ({ subtotal: 'subtotal', gst: 'GST/HST', pst: 'PST/QST' }[k])).join(' and ')}</b> couldn’t be read clearly and ${a.inferred.length > 1 ? 'were' : 'was'} worked out from the total, so double-check ${a.inferred.length > 1 ? 'them' : 'it'}` : ''}.${p.total !== null ? ` Receipt total read: <b>${money(p.total)}</b>.` : ''}`, a.estimated);
+  };
+  const photo = wirePhoto(applyScan);
 
   form.querySelectorAll('[data-b]').forEach((b) => (b.onclick = () => {
     billable = b.dataset.b === '1';
@@ -440,7 +493,6 @@ async function viewItemForm({ itemId }) {
       <div class="actions"><button class="pri" id="save">Save</button>${i ? '<button type="button" class="danger" id="del">Delete</button>' : ''}</div>
     </form>`;
   const form = $('#f');
-  const photo = wirePhoto();
   const months = () => { const n = parseInt(form.wnum.value, 10); return n > 0 ? n * Number(form.wunit.value) : null; };
   const showEnds = () => {
     const m = months();
@@ -450,6 +502,16 @@ async function viewItemForm({ itemId }) {
     $('#wends').textContent = `Warranty ends ${d.toISOString().slice(0, 10)}`;
   };
   ['wnum', 'wunit', 'purchase_date'].forEach((n) => form[n].addEventListener('input', showEnds)); showEnds();
+
+  const photo = wirePhoto((text) => {                      // OCR: purchase date, vendor and price (the receipt total)
+    const p = parseReceiptText(text);
+    const price = p.total ?? (p.subtotal !== null ? p.subtotal + (p.gst ?? 0) + (p.pst ?? 0) + (p.tip ?? 0) : null);
+    const filled = [];
+    if (scanFill(form.vendor, p.vendor)) filled.push('vendor');
+    if (scanFill(form.purchase_date, p.date, form.purchase_date.value === today())) { filled.push('date'); showEnds(); }
+    if (price !== null && scanFill(form.price, fromCents(price))) filled.push('price');
+    showScanMsg(filled.length ? `Filled from the photo: <b>${filled.join(', ')}</b>. Check the highlighted fields, then add the item name.` : 'Couldn’t pick out any details from that photo.', !filled.length);
+  });
 
   form.onsubmit = async (ev) => {
     ev.preventDefault();
