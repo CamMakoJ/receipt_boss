@@ -1,0 +1,9 @@
+node_modules
+data
+.git
+*.log
+public/vendor
+test
+deploy
+Dockerfile
+docker-compose.yml

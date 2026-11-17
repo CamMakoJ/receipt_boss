@@ -46,6 +46,22 @@ HOST=0.0.0.0 TLS_CERT=... TLS_KEY=... npm start
 
 Open the URL, create the admin account, then add family under **⚙ Settings → Users**. A sample systemd unit is in `deploy/receipt-boss.service`.
 
+## Docker
+
+```bash
+mkdir -p data rclone certs && sudo chown 1000:1000 data rclone   # the container runs as the unprivileged "node" user (uid 1000)
+docker compose up -d --build
+```
+
+- **Data** lives in `./data` (database, photos, local backups) — that folder is the only thing to protect and back up. Updating is `git pull && docker compose up -d --build`; migrations run on start.
+- **HTTPS:** drop `cert.pem` / `key.pem` in `./certs`, uncomment `TLS_CERT`, `TLS_KEY` and the `./certs` volume in `docker-compose.yml` (for example from `tailscale cert`). Or put Caddy/nginx in front and set `TRUST_PROXY: "1"`.
+- **Google Drive:** rclone is included. Configure it inside the container; the login is saved in `./rclone`:
+  `docker compose exec -it receipt-boss rclone config` (then `rclone lsd gdrive:` to check).
+- **Local AI** on the Docker host: in Settings → AI use `http://host.docker.internal:11434/v1` (Ollama) or your server's LAN address. `localhost` would mean the container itself.
+- **Restore:** `docker compose stop`, then
+  `docker compose run --rm -v "$PWD/backups-in:/in:ro" receipt-boss node scripts/restore.js /in/<backup file>` (add `RB_BACKUP_PASSPHRASE` with `-e` for encrypted ones), then `docker compose up -d`.
+- Health: the container reports healthy when the server answers; `docker compose ps` shows it.
+
 ## Local AI (optional)
 
 Any server that speaks the OpenAI chat API works — **Ollama**, **LM Studio**, **llama.cpp**, **vLLM** — on this machine or another one on your network. Configure it in **⚙ Settings → Local AI** (admin): server address, model name, tick *vision* if the model can look at images, **Test connection**. Requests go only to the address you enter. The API key (if any) is write-only in the UI and is left out of backups.
