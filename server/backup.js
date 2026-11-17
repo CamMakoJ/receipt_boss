@@ -43,7 +43,7 @@ export async function createBackup(dest) {
     const snap = path.join(tmp, 'receipts.db');
     db.exec(`VACUUM INTO ${sqlQuote(snap)}`);
     const copy = new DatabaseSync(snap);
-    copy.exec('DELETE FROM sessions'); // never ship login sessions around
+    copy.exec("DELETE FROM sessions; DELETE FROM settings WHERE key = 'ai.api_key'"); // never ship login sessions or the AI key around
     copy.close();
 
     fs.mkdirSync(path.dirname(dest), { recursive: true });

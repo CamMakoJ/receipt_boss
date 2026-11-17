@@ -3,7 +3,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { IMAGE_DIR } from './db.js';
 
-export const err = (status, message) => Object.assign(new Error(message), { status });
+export const err = (status, message, extra) => Object.assign(new Error(message), { status, extra });
 export const wrap = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
 export const str = (v, max = 500) => String(v ?? '').trim().slice(0, max);
 

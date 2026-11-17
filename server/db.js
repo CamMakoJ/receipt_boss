@@ -65,6 +65,23 @@ if (version() < 2) {
   } catch (e) { db.exec('ROLLBACK'); throw e; }
 }
 
+if (version() < 3) {
+  db.exec('BEGIN');
+  try {
+    db.exec(`
+      ALTER TABLE receipts ADD COLUMN ocr_text TEXT NOT NULL DEFAULT '';          -- text read from the photo (search + AI check)
+      ALTER TABLE receipts ADD COLUMN check_status TEXT NOT NULL DEFAULT 'none';  -- none | pending | ok | review | error | reviewed
+      ALTER TABLE receipts ADD COLUMN check_json TEXT NOT NULL DEFAULT '';
+      ALTER TABLE receipts ADD COLUMN billing_status TEXT NOT NULL DEFAULT 'unbilled'; -- unbilled | invoiced | paid (billable receipts)
+      ALTER TABLE receipts ADD COLUMN invoice_ref TEXT NOT NULL DEFAULT '';
+      ALTER TABLE receipts ADD COLUMN invoiced_at TEXT;
+      ALTER TABLE items ADD COLUMN ocr_text TEXT NOT NULL DEFAULT '';
+    `);
+    db.exec('PRAGMA user_version = 3');
+    db.exec('COMMIT');
+  } catch (e) { db.exec('ROLLBACK'); throw e; }
+}
+
 export function tx(fn) {
   db.exec('BEGIN IMMEDIATE');
   try { const r = fn(); db.exec('COMMIT'); return r; }

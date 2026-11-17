@@ -44,11 +44,16 @@ export function registerItems(app) {
     }
     const name = str(b.name, 200);
     if (!name) throw err(400, 'name is required');
+    const date = dateStr(b.purchase_date), price = cents(b.price, 'price');
+    if (!b.allow_duplicate) {
+      const duplicates = db.prepare('SELECT id, name, purchase_date, price FROM items WHERE lower(name) = lower(?) AND purchase_date = ? AND price = ?').all(name, date, price);
+      if (duplicates.length) throw err(409, 'This looks like an item you already added', { duplicates });
+    }
     const image = b.image ? saveImage(decodeImage(b.image)) : null;
     try {
-      const r = db.prepare(`INSERT INTO items (created_by, client_id, name, category, purchase_date, vendor, price, warranty_months, serial, notes, image)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?)`).run(req.user.id, clientId, name, str(b.category, 60), dateStr(b.purchase_date), str(b.vendor, 200),
-        cents(b.price, 'price'), months(b.warranty_months), str(b.serial, 200), str(b.notes, 2000), image);
+      const r = db.prepare(`INSERT INTO items (created_by, client_id, name, category, purchase_date, vendor, price, warranty_months, serial, notes, image, ocr_text)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`).run(req.user.id, clientId, name, str(b.category, 60), date, str(b.vendor, 200),
+        price, months(b.warranty_months), str(b.serial, 200), str(b.notes, 2000), image, str(b.ocr_text, 8000));
       res.status(201).json(pub(get(r.lastInsertRowid)));
     } catch (e) { rmImage(image); throw e; }
   });
@@ -63,7 +68,7 @@ export function registerItems(app) {
     else if (b.remove_image) image = null;
     const name = b.name !== undefined ? str(b.name, 200) : i.name;
     if (!name) throw err(400, 'name is required');
-    db.prepare(`UPDATE items SET name=?, category=?, purchase_date=?, vendor=?, price=?, warranty_months=?, serial=?, notes=?, image=? WHERE id=?`).run(
+    db.prepare(`UPDATE items SET name=?, category=?, purchase_date=?, vendor=?, price=?, warranty_months=?, serial=?, notes=?, image=?, ocr_text=? WHERE id=?`).run(
       name,
       b.category !== undefined ? str(b.category, 60) : i.category,
       b.purchase_date !== undefined ? dateStr(b.purchase_date) : i.purchase_date,
@@ -72,7 +77,7 @@ export function registerItems(app) {
       b.warranty_months !== undefined ? months(b.warranty_months) : i.warranty_months,
       b.serial !== undefined ? str(b.serial, 200) : i.serial,
       b.notes !== undefined ? str(b.notes, 2000) : i.notes,
-      image, i.id);
+      image, b.ocr_text !== undefined ? str(b.ocr_text, 8000) : i.ocr_text, i.id);
     if (image !== i.image) rmImage(i.image);
     res.json(pub(get(i.id)));
   });

@@ -20,11 +20,11 @@ export function applyAutoTax(receipts) {
 
 export function buildCsv(project, receipts) {
   const head = ['Number', 'Date', 'Project', 'Province', 'Category', 'Vendor', 'Description', 'Billable',
-    'Subtotal', 'GST/HST', 'PST/QST', 'Tip', 'Total', 'Tax estimated', 'Notes', 'Image file'];
+    'Subtotal', 'GST/HST', 'PST/QST', 'Tip', 'Total', 'Tax estimated', 'Notes', 'Image file', 'Billing status', 'Invoice'];
   const rows = receipts.map((r) => [
     r.number, r.date, project.name, r.province, r.category, r.vendor, r.description, r.billable ? 'Billable' : 'Non-billable',
     plain(r.subtotal), plain(r.gst), plain(r.pst), plain(r.tip), plain(total(r)), r.est ? 'Yes' : '', r.notes,
-    hasImage(r) ? `receipts/${imageName(r)}` : '',
+    hasImage(r) ? `receipts/${imageName(r)}` : '', r.billable ? r.billing_status : '', r.billable ? r.invoice_ref : '',
   ]);
   return '﻿' + [head, ...rows].map((r) => r.map(csvCell).join(',')).join('\r\n') + '\r\n'; // BOM: Excel reads UTF-8
 }
@@ -48,7 +48,7 @@ const LABEL_W = COLS.filter((c) => !NUM_KEYS.includes(c.key)).reduce((a, c) => a
 const MARGIN = 36;
 const INK = '#1f2937', MUTED = '#6b7280', RULE = '#d1d5db', HEAD_BG = '#eef2f7';
 
-export function buildPdf(project, receipts, { from, to } = {}) {
+export function buildPdf(project, receipts, { from, to, invoice } = {}) {
   return new Promise((resolve, reject) => {
     const doc = new PDFDocument({ size: 'LETTER', layout: 'landscape', margin: MARGIN, bufferPages: true,
       info: { Title: `Receipt report - ${project.name}`, Creator: 'Receipt Boss' } });
@@ -132,6 +132,7 @@ export function buildPdf(project, receipts, { from, to } = {}) {
     doc.font('Helvetica-Bold').fontSize(20).fillColor(INK).text(project.name, left, MARGIN);
     doc.font('Helvetica').fontSize(10).fillColor(MUTED);
     if (project.client) doc.text(`Client: ${project.client}`);
+    if (invoice) doc.text(`Invoice: ${invoice}`);
     const range = from || to ? `${from || 'start'} to ${to || 'present'}` : 'All dates';
     doc.text(`Period: ${range}   •   Generated ${new Date().toISOString().slice(0, 10)}   •   ${receipts.length} receipt(s)`);
     if (receipts.some((r) => r.est)) doc.text('* GST/PST estimated from the receipt province\'s standard rates (none was entered).');
@@ -155,7 +156,7 @@ export function buildPdf(project, receipts, { from, to } = {}) {
       doc.font('Helvetica-Bold').fontSize(13).fillColor(INK)
         .text(`#${String(r.number).padStart(3, '0')}  ${r.description || r.vendor || ''}`, left, MARGIN);
       doc.font('Helvetica').fontSize(9).fillColor(MUTED).text(
-        [r.vendor, r.date, r.category, r.province, r.billable ? 'Billable' : 'Non-billable',
+        [r.vendor, r.date, r.category, r.province, r.billable ? `Billable${r.billing_status && r.billing_status !== 'unbilled' ? ` (${r.billing_status}${r.invoice_ref ? ' ' + r.invoice_ref : ''})` : ''}` : 'Non-billable',
           `Subtotal ${money(r.subtotal)}`, `GST/HST ${money(r.gst)}${r.est ? '*' : ''}`, `PST/QST ${money(r.pst)}${r.est ? '*' : ''}`,
           `Tip ${money(r.tip)}`, `Total ${money(total(r))}`].filter(Boolean).join('   •   '));
       if (r.notes) doc.text(`Notes: ${r.notes}`);

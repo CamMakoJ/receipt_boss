@@ -1,7 +1,7 @@
 // Offline support: app shell is cached; API reads fall back to the last good response.
-const VERSION = 'v4';
+const VERSION = 'v5';
 const SHELL = `shell-${VERSION}`, DATA = `data-${VERSION}`, VENDOR = 'vendor-v1'; // OCR engine (~15 MB) survives app updates
-const SHELL_FILES = ['/', '/app.js', '/crop.js', '/warp.js', '/ocr.js', '/ocr-parse.js', '/style.css', '/manifest.webmanifest', '/icon.svg'];
+const SHELL_FILES = ['/', '/app.js', '/crop.js', '/warp.js', '/filters.js', '/ocr.js', '/ocr-parse.js', '/style.css', '/manifest.webmanifest', '/icon.svg'];
 
 self.addEventListener('install', (e) => {
   e.waitUntil(caches.open(SHELL).then((c) => c.addAll(SHELL_FILES)).then(() => self.skipWaiting()));
@@ -16,7 +16,7 @@ self.addEventListener('fetch', (e) => {
   const url = new URL(req.url);
   if (req.method !== 'GET' || url.origin !== location.origin) return;
   // downloads and admin/backup traffic: never cached, always network
-  if (/\/(export\.zip|report\.pdf|report\.csv|items\.csv)$/.test(url.pathname) || url.pathname.startsWith('/api/backup') || url.pathname.startsWith('/api/users')) return;
+  if (/\/(export\.zip|report\.pdf|report\.csv|items\.csv)$/.test(url.pathname) || url.pathname.startsWith('/api/backup') || url.pathname.startsWith('/api/users') || url.pathname === '/api/ai') return;
 
   if (url.pathname.startsWith('/api/')) {
     const isImage = url.pathname.endsWith('/image');

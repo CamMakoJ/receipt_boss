@@ -12,6 +12,10 @@ Self-hosted receipt tracker. Runs on a machine on your LAN, used from phones/com
 - **Photo → crop → read.** Taking or choosing a photo opens a full-screen **crop screen**: the receipt is auto-outlined with four free corners (drag any corner onto the paper's corner — a magnifier shows the exact spot under your finger — or drag an edge/the whole outline; rotate, Reset, Auto). **Done** flattens the outline into an upright rectangle (**perspective correction**, so photos shot at an angle come out straight), then reads the receipt text and **pre-fills** vendor, date, province (from the postal code), category (from the vendor), subtotal, GST/HST, PST/QST and tip. Filled fields are highlighted yellow for you to check; if a figure couldn't be read clearly but the total pins it down, it is filled from the total and called out by name. Reading runs **on your device** (Tesseract in WebAssembly, served by this app) — no image or text is sent anywhere, and it works offline. Household items get date, vendor and price. Switch auto-reading off with the checkbox under the photo buttons; **🔍 Read text** re-runs it on the current photo.
 - **Report export** per project (optional date range): PDF (summary, billable and non-billable tables with province & category, then one page per receipt image) + CSV + `receipts/001_description.jpg` — all in one zip, or PDF/CSV separately.
   - *Auto-calculate missing GST/PST* option (on by default): receipts saved with **no** tax get an estimate from their own province, marked `*` in the PDF and "Tax estimated = Yes" in the CSV. Nothing is changed in the database.
+- **Invoiced / paid tracking.** Billable receipts are *unbilled → invoiced → paid*. Tap **Select** on the Billable list to mark several at once, or use **Create invoice bundle…**: it marks the unbilled billable receipts in the date range as invoiced under your invoice number and downloads a bundle of just those (PDF titled with the invoice number), so nothing is billed twice. The project summary shows unbilled / invoiced / paid totals; exports can be filtered by status or invoice number, and the CSV has *Billing status* and *Invoice* columns.
+- **Duplicate warning.** Saving a receipt with the same date, vendor (or description) and total as one you already entered — in any of your projects — asks before saving. Offline entries that turn out to be duplicates are held at sync time with a *Save anyway* button. Household items are compared by name + date + price.
+- **Search & filters.** The Household page (and *Search all receipts* on the Projects page) has a search box plus filters — category, warranty status, store, date range, price range, sort — with removable chips. Search covers names, stores, serial numbers, notes **and the text read from the photo**. It runs on the device, so it is instant and works offline.
+- **Local AI (optional).** Connect any OpenAI-compatible server on your network (see *Local AI* below) for a second-opinion check of work receipts and for **✨ Ask** search.
 - **Household items & warranties** (TV, fridge, laptop…): item, purchase date, price, vendor, serial, receipt photo, and warranty length (months/years, or unknown). Shows warranty end date and groups into *ending soon (90 days) / under warranty / unknown / expired*. Shared by everyone on the server. CSV export.
 - **Backups** of everything (database, accounts, all images) to a local folder, another folder, and/or **Google Drive**; scheduled or on demand.
 - **Offline**: installable PWA. Receipts and household items added with no connection are saved on the device and sync automatically.
@@ -37,6 +41,22 @@ HOST=0.0.0.0 TLS_CERT=... TLS_KEY=... npm start
 `npm install` also copies the OCR engine and English model into `public/vendor/tesseract/` (~15 MB, git-ignored; the browser downloads only ~7 MB of it, once, on the first scan and caches it). If that step was skipped, run `node scripts/vendor-ocr.js`; without it the app still works, just without auto-reading.
 
 Open the URL, create the admin account, then add family under **⚙ Settings → Users**. A sample systemd unit is in `deploy/receipt-boss.service`.
+
+## Local AI (optional)
+
+Any server that speaks the OpenAI chat API works — **Ollama**, **LM Studio**, **llama.cpp**, **vLLM** — on this machine or another one on your network. Configure it in **⚙ Settings → Local AI** (admin): server address, model name, tick *vision* if the model can look at images, **Test connection**. Requests go only to the address you enter. The API key (if any) is write-only in the UI and is left out of backups.
+
+Example with Ollama (a vision model so it can look at the receipt photo; a text-only model also works — it then reads the text scanned from the photo):
+```bash
+ollama pull qwen2.5vl:7b            # or: llama3.2-vision, gemma3, ...   text-only: qwen2.5:7b
+# Settings → address http://localhost:11434/v1 → model qwen2.5vl:7b → tick "can look at images"
+```
+
+**What it does**
+- **Double-check of work receipts.** After you save a receipt (automatically, or **✨ Check now** on the receipt), the model reads the receipt *without seeing what you typed*, and the app compares its reading with your entry. Differences show up as ⚠ on the project list and in a card on the receipt, with a one-tap **Use $84.75** to fix a field. Plain rules add notes (date in the future, taxes that don't match the province's standard rate). Checks run one at a time in the background, so saving is never blocked; if the AI server is down the receipt is simply marked "couldn't be checked".
+- **✨ Ask search.** Type a sentence — *the fridge from Home Depot last year under $2000* — and tap ✨ Ask. The model turns it into the same filters you can set by hand (including synonyms like *refrigerator*); they appear as chips you can remove. It never sees your data beyond the list of categories and store names used to ground the request.
+
+The model only *reads* and *translates*; matching amounts, dates and filtering are done by ordinary code. Small local models still misread sometimes — treat ⚠ as "take a look", and a clean ✓ as a second opinion, not a guarantee. Slow models: raise the timeout in settings. The first check after loading a model can take a while.
 
 ## HTTPS on your LAN
 
@@ -81,6 +101,8 @@ Current data is moved to `pre-restore-<timestamp>/` inside `DATA_DIR`, not delet
 Open the app once while online. Then, offline you can browse what you've already viewed and **add receipts and household items** (queued, shown as "Waiting to sync"). You can't edit/delete existing records, create projects, change settings or export until you're back online. Queued items are tied to the signed-in user. Syncing is idempotent (no duplicates on retry). Receipt numbers are assigned by the server when a receipt syncs.
 
 ## Notes & limits
+
+- **Duplicate matching** is exact: same day, same vendor text (case-insensitive) and same total to the cent. Near-misses are not flagged.
 
 - **Perspective correction needs all four corners of the receipt in the photo.** If the paper runs off the edge of the frame, the outline's corners there are guesses and the straightening will be slightly off — retake with the whole receipt visible (very long receipts: shoot in two halves, or crop to the part you need).
 - **Receipt reading is best-effort.** It is English-only, works best on a flat, well-lit, tightly cropped photo, and can't read handwriting (a handwritten tip is entered by hand). It sometimes misreads a digit — that's why filled fields are highlighted, and why it never saves anything for you. The first scan on a device takes a few seconds longer while the engine loads.
