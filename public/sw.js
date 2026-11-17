@@ -1,5 +1,5 @@
 // Offline support: app shell is cached; API reads fall back to the last good response.
-const VERSION = 'v1';
+const VERSION = 'v2';
 const SHELL = `shell-${VERSION}`, DATA = `data-${VERSION}`;
 const SHELL_FILES = ['/', '/app.js', '/style.css', '/manifest.webmanifest', '/icon.svg'];
 
@@ -15,7 +15,8 @@ self.addEventListener('fetch', (e) => {
   const req = e.request;
   const url = new URL(req.url);
   if (req.method !== 'GET' || url.origin !== location.origin) return;
-  if (/\/(export\.zip|report\.pdf|report\.csv)$/.test(url.pathname)) return; // downloads: network only
+  // downloads and admin/backup traffic: never cached, always network
+  if (/\/(export\.zip|report\.pdf|report\.csv|items\.csv)$/.test(url.pathname) || url.pathname.startsWith('/api/backup') || url.pathname.startsWith('/api/users')) return;
 
   if (url.pathname.startsWith('/api/')) {
     const isImage = url.pathname.endsWith('/image');

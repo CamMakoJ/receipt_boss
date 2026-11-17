@@ -4,12 +4,15 @@
   "description": "Self-hosted, offline-capable receipt tracker with project reports",
   "type": "module",
   "private": true,
-  "engines": { "node": ">=22.13" },
+  "engines": {
+    "node": ">=22.13"
+  },
   "scripts": {
     "start": "node --no-warnings server/index.js",
-    "test": "node --no-warnings --test test/api.test.js"
+    "test": "node --no-warnings --test test/*.test.js"
   },
   "dependencies": {
+    "adm-zip": "^0.5.16",
     "archiver": "^7.0.1",
     "express": "^4.21.2",
     "pdfkit": "^0.16.0"

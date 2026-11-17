@@ -1,0 +1,19 @@
+# /etc/systemd/system/receipt-boss.service   (adjust paths/user, then: systemctl enable --now receipt-boss)
+[Unit]
+Description=Receipt Boss
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=receipts
+WorkingDirectory=/opt/receipt-boss
+Environment=PORT=8443
+Environment=DATA_DIR=/var/lib/receipt-boss
+Environment=TLS_CERT=/var/lib/receipt-boss/tls/cert.pem
+Environment=TLS_KEY=/var/lib/receipt-boss/tls/key.pem
+# rclone's Google Drive config lives in this user's ~/.config/rclone/rclone.conf
+ExecStart=/usr/bin/node --no-warnings server/index.js
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
