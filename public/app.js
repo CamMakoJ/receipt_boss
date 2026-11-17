@@ -1,7 +1,8 @@
 // Receipt Boss front-end: vanilla JS, no build step.
-import { openCropper } from './crop.js';
+import { openCropper, autoCropFile, canvasToJpeg } from './crop.js';
 import { scanCanvas, cancelScan, warmOcr } from './ocr.js';
-import { parseReceiptText, resolveAmounts } from './ocr-parse.js';
+import { parseReceiptText, resolveAmounts, fieldsFromScan } from './ocr-parse.js';
+import { indexByKey, suggestFor } from './vendor.js';
 import { emptyFilters, filterRecords, sortRecords, activeChips, clearFilter, hasFilters, warrantyState, SORTS } from './filters.js';
 const $ = (s, el = document) => el.querySelector(s);
 const app = $('#app');
@@ -80,11 +81,12 @@ const queueDel = (id) => store('readwrite', (s) => s.delete(id));
 
 let flushing = false;
 async function flushQueue(force = false) {
-  if (flushing || !navigator.onLine || !me) return;
+  if (flushing || !navigator.onLine || !me) return { sent: 0, flagged: 0 };
   flushing = true;
   let sent = 0, flagged = 0;
   try {
     for (const item of await queueAll()) {
+      if (item.hold) continue;                               // quick capture: still being read on this device
       if (item.error && force !== true) continue;           // waits for the user: duplicate / rejected
       try {
         await api('POST', item.url, { ...item.data, client_id: item.client_id });
@@ -98,9 +100,12 @@ async function flushQueue(force = false) {
       }
     }
   } finally { flushing = false; }
-  if (sent) toast(`Synced ${sent} item${sent > 1 ? 's' : ''}`);
-  if (sent || flagged) route();                                 // show what changed (synced, or needs a decision)
+  const capturing = location.hash.startsWith('#/capture');      // that screen tracks its own progress; don't re-render it under the user
+  if (sent && !capturing) toast(`Synced ${sent} item${sent > 1 ? 's' : ''}`);
+  if ((sent || flagged) && !capturing) route();                 // show what changed (synced, or needs a decision)
   await renderBanner();
+  dispatchEvent(new Event('queue-changed'));                    // screens that show queue state (quick capture) refresh themselves
+  return { sent, flagged };
 }
 
 async function renderBanner() {
@@ -121,15 +126,22 @@ addEventListener('offline', renderNet);
 const ocrOn = () => localStorage.getItem('ocr-on') !== '0';
 
 /** Photo picker markup shared by receipt and item forms. */
-function photoField(existingSrc) {
-  return `<label>Photo</label>
+function photoField() {
+  return `<label>Photos <span class="muted small">— add several for a long receipt or extra pages (warranty card, serial number…)</span></label>
     <div class="row"><label class="btn pri" style="margin:0">📷 Take photo<input id="cam" type="file" accept="image/*" capture="environment" hidden></label>
-      <label class="btn" style="margin:0">🖼 Choose file<input id="pick" type="file" accept="image/*" hidden></label>
-      <button type="button" id="rescan" hidden>🔍 Read text</button>
-      ${existingSrc ? '<button type="button" id="rmimg" class="danger">Remove</button>' : ''}</div>
-    <label class="check"><input type="checkbox" id="ocrtoggle" ${ocrOn() ? 'checked' : ''}> Read the receipt automatically after cropping (on this device; nothing is uploaded for reading)</label>
-    <div id="scanmsg" class="scanmsg" hidden></div>
-    <img id="prev" class="preview" ${existingSrc ? `src="${existingSrc}"` : 'hidden'} alt="">`;
+      <label class="btn" style="margin:0">🖼 Choose files<input id="pick" type="file" accept="image/*" multiple hidden></label>
+      <button type="button" id="rescan" hidden>🔍 Read text</button></div>
+    <div id="strip" class="strip"></div>
+    <label class="check"><input type="checkbox" id="ocrtoggle" ${ocrOn() ? 'checked' : ''}> Read each photo automatically after cropping (on this device; nothing is uploaded for reading)</label>
+    <div id="scanmsg" class="scanmsg" hidden></div>`;
+}
+
+/** Tap a thumbnail to look at the photo full screen. */
+function openViewer(src) {
+  const box = document.createElement('div');
+  box.className = 'viewer'; box.innerHTML = `<img src="${src}" alt=""><button type="button" aria-label="Close">✕</button>`;
+  box.onclick = () => box.remove();
+  document.body.appendChild(box);
 }
 
 /** Full-screen "Reading receipt…" overlay with a skip button. */
@@ -150,29 +162,72 @@ async function runScan(canvas, onText) {
 }
 
 /**
- * Wires the photo buttons: choose/take -> crop screen -> (optional) OCR -> onScan(text).
- * Returns the state the form reads on save: { data (jpeg data URL | null), remove }.
+ * Wires the photo strip: choose/take (several allowed) -> crop screen -> (optional) OCR -> onScan(text) for each new photo.
+ * Returns the state the form reads on save: st.payload(create) = the photo fields of the request body.
  */
-function wirePhoto(onScan) {
-  const st = { data: null, remove: false, canvas: null, text: '' };   // text = what OCR read; saved for search and the AI check
-  const scan = async () => { if (st.canvas && onScan) await runScan(st.canvas, (text) => { st.text = text; onScan(text); }); };
-  const onFile = async (ev) => {
-    const file = ev.target.files[0]; ev.target.value = '';
-    if (!file) return;
-    try {
-      const res = await openCropper(file);          // straight to the crop screen
-      if (!res) return;                              // cancelled: keep whatever photo was there before
-      Object.assign(st, { data: res.dataUrl, canvas: res.canvas, remove: false, text: '' });
-      $('#prev').src = res.dataUrl; $('#prev').hidden = false;
-      if (onScan) $('#rescan').hidden = false;
-      if (onScan && ocrOn()) await scan();
-    } catch (e) { toast(e.message, true); }
+function wirePhoto(onScan, { kind, rec } = {}) {
+  const base = kind === 'item' ? '/api/items' : '/api/receipts';
+  const st = {
+    existing: (rec?.photos || []).map((id) => ({ id, src: `${base}/${rec.id}/photos/${id}` })),   // already on the server, in order (first = cover)
+    removed: [], added: [], orderChanged: false, last: null,                                       // added: [{ dataUrl, text }]
   };
-  $('#cam').onchange = onFile; $('#pick').onchange = onFile;
-  $('#rescan').onclick = scan;
+  st.text = () => st.added.map((a) => a.text).filter(Boolean).join('\n\n');                      // what OCR read from the newly added photos
+  st.payload = (create) => {
+    const o = {}, adds = st.added.map((a) => a.dataUrl), text = st.text();
+    if (create) { if (adds.length) o.images = adds; if (text) o.ocr_text = text; }
+    else {
+      if (adds.length) o.add_images = adds;
+      if (st.removed.length) o.remove_photo_ids = st.removed;
+      if (st.orderChanged) o.photo_order = st.existing.map((p) => p.id);
+      if (text) o.ocr_append = text;                                                              // keep the text of earlier pages
+    }
+    return o;
+  };
+  const total = () => st.existing.length + st.added.length;
+  const render = () => {
+    const tiles = [
+      ...st.existing.map((p, i) => ({ src: p.src, old: true, id: p.id, cover: i === 0 })),
+      ...st.added.map((a, n) => ({ src: a.dataUrl, old: false, n, cover: !st.existing.length && n === 0 })),
+    ];
+    $('#strip').innerHTML = tiles.map((t) => `<div class="tile"><img src="${t.src}" data-view="${t.src}" alt="">${t.cover && tiles.length > 1 ? '<span class="cover">cover</span>' : ''}
+      <button type="button" class="x" data-rm="${t.old ? 'old:' + t.id : 'new:' + t.n}" aria-label="Remove photo">✕</button>
+      ${t.old && !t.cover ? `<button type="button" class="star" data-cover="${t.id}" title="Make this the cover photo">★</button>` : ''}</div>`).join('');
+    $('#rescan').hidden = !(onScan && st.last);
+  };
+  const scan = async (entry) => {
+    if (!st.last || !onScan) return;
+    await runScan(st.last, (text) => { entry.text = text; onScan(text); });
+  };
+  const onFiles = async (ev) => {
+    const files = [...ev.target.files]; ev.target.value = '';
+    for (const file of files) {
+      if (total() >= 12) { toast('Up to 12 photos each', true); break; }
+      try {
+        const res = await openCropper(file);          // straight to the crop screen
+        if (!res) continue;                            // cancelled: skip this photo
+        const entry = { dataUrl: res.dataUrl, text: '' };
+        st.added.push(entry); st.last = res.canvas; st.lastEntry = entry; render();
+        if (onScan && ocrOn()) await scan(entry);
+      } catch (e) { toast(e.message, true); }
+    }
+  };
+  $('#cam').onchange = onFiles; $('#pick').onchange = onFiles;
+  $('#rescan').onclick = () => scan(st.lastEntry);
   $('#ocrtoggle').onchange = (ev) => localStorage.setItem('ocr-on', ev.target.checked ? '1' : '0');
-  if ($('#rmimg')) $('#rmimg').onclick = () => { st.remove = true; st.data = null; st.canvas = null; st.text = ''; $('#prev').hidden = true; $('#rescan').hidden = true; };
+  $('#strip').onclick = (ev) => {
+    const rm = ev.target.closest('[data-rm]'), cv = ev.target.closest('[data-cover]'), view = ev.target.closest('[data-view]');
+    if (rm) {
+      const [k, x] = rm.dataset.rm.split(':'), n = Number(x);
+      if (k === 'old') { st.removed.push(n); st.existing = st.existing.filter((p) => p.id !== n); }
+      else { if (st.added[n] === st.lastEntry) { st.last = null; st.lastEntry = null; } st.added.splice(n, 1); }
+      render();
+    } else if (cv) {
+      const i = st.existing.findIndex((p) => p.id === Number(cv.dataset.cover));
+      st.existing.unshift(...st.existing.splice(i, 1)); st.orderChanged = true; render();
+    } else if (view) openViewer(view.dataset.view);
+  };
   if (onScan && ocrOn()) warmOcr();                  // fetch the OCR engine in the background while online
+  render();
   return st;
 }
 
@@ -218,6 +273,10 @@ async function logout() {
   meta = null; location.hash = '#/'; location.reload();
 }
 
+const thumb = (kind, rec) => (rec.photos?.length
+  ? `<div class="thumbwrap"><img class="thumb" loading="lazy" src="/api/${kind === 'item' ? 'items' : 'receipts'}/${rec.id}/photos/${rec.photos[0]}" alt="">${rec.photos.length > 1 ? `<span class="count">${rec.photos.length}</span>` : ''}</div>`
+  : '<div class="thumb"></div>');
+
 // ------------------------------------------------------------------ router
 function renderNav(active) {
   const nav = $('#nav'); nav.hidden = !me;
@@ -235,6 +294,8 @@ async function route() {
     if (parts[0] === 'settings') { renderNav('settings'); return await viewSettings(); }
     renderNav('projects');
     if (parts[0] === 'search') return await viewSearch();
+    if (parts[0] === 'capture') return await viewCapture();
+    if (parts[0] === 'inbox') return await viewInbox();
     if (!parts.length) return await viewProjects();
     if (parts[0] === 'p' && parts[2] === 'new') return await viewReceiptForm({ projectId: parts[1] });
     if (parts[0] === 'p') return await viewProject(parts[1]);
@@ -264,8 +325,10 @@ async function viewProjects() {
       <div class="spread"><b>${esc(p.name)}</b><span class="money"><b>${money(p.all.total)}</b></span></div>
       <div class="muted">${esc(p.client)}${p.client ? ' · ' : ''}${p.all.count} receipt${p.all.count === 1 ? '' : 's'} · ${esc(p.province)}</div>
       <div class="row small"><span class="pill">Billable ${money(p.billable.total)}</span><span class="pill nb">Non-billable ${money(p.non_billable.total)}</span></div></a>`;
+  const inbox = await api('GET', '/inbox').catch(() => []);
   app.innerHTML = `<h1>Projects</h1>
-    <div class="actions" style="margin-top:0"><a class="btn" href="#/search">🔍 Search all receipts</a></div>
+    <div class="actions" style="margin-top:0"><a class="btn pri" href="#/capture">⚡ Quick capture</a><a class="btn" href="#/search">🔍 Search all receipts</a></div>
+    ${inbox.length ? `<a class="card" href="#/inbox" style="border-color:#fcd34d;background:#fffbeb"><b>📥 Inbox</b> — ${inbox.length} capture${inbox.length === 1 ? '' : 's'} waiting for review</a>` : ''}
     ${active.map(card).join('') || '<p class="muted">No projects yet. Create one to start adding receipts.</p>'}
     <div class="card"><h2 style="margin-top:0">New project</h2>
       <form id="newp">
@@ -301,7 +364,7 @@ async function viewProject(id) {
   const billPill = (r) => (r.billable ? `<span class="pill ${r.billing_status === 'unbilled' ? 'nb' : r.billing_status === 'paid' ? '' : 'pending'}">${r.billing_status}${r.invoice_ref ? ' ' + esc(r.invoice_ref) : ''}</span>` : '');
   const rcpt = (r) => `<a class="card row selectable" href="#/r/${r.id}" data-id="${r.id}" style="flex-wrap:nowrap">
       ${r.billable ? `<input type="checkbox" class="sel" data-sel="${r.id}" aria-label="Select receipt">` : ''}
-      ${r.has_image ? `<img class="thumb" loading="lazy" src="/api/receipts/${r.id}/image" alt="">` : '<div class="thumb"></div>'}
+      ${thumb('receipt', r)}
       <div class="grow"><div class="spread"><b>#${pad(r.number)} ${esc(r.description || r.vendor || 'Receipt')}</b><span class="money"><b>${money(r.total)}</b></span></div>
       <div class="muted small">${esc(r.date)}${r.vendor ? ' · ' + esc(r.vendor) : ''} · ${esc(r.province)}${r.category ? ' · ' + esc(r.category) : ''}</div>
       <div class="muted small">Sub ${money(r.subtotal)} · GST ${money(r.gst)} · PST ${money(r.pst)} · Tip ${money(r.tip)}</div>
@@ -321,6 +384,7 @@ async function viewProject(id) {
     <div class="actions"><a class="btn pri" href="#/p/${p.id}/new">＋ Add receipt</a></div>
     <div class="card">${sumTable}${billLine}</div>
     ${pending.length ? `<h2>Pending sync (${pending.length})</h2>${pending.map(pend).join('')}` : ''}
+    ${p.drafts?.length ? `<h2>Inbox (${p.drafts.length})</h2><p class="muted small" style="margin-top:-4px">Quick captures — not counted until you file them.</p>${p.drafts.map((d) => draftCard({ ...d, project_name: p.name })).join('')}` : ''}
     <div class="spread"><h2>Billable (${bill.length})</h2>${bill.length ? '<button type="button" id="selbtn">Select</button>' : ''}</div>
     <div id="billlist">${bill.map(rcpt).join('') || '<p class="muted">None</p>'}</div>
     <h2>Non-billable (${non.length})</h2>${non.map(rcpt).join('') || '<p class="muted">None</p>'}
@@ -443,18 +507,23 @@ async function viewReceiptForm({ projectId, receiptId }) {
   let billable = r ? r.billable : true;
   const v = r || { date: today(), vendor: '', category: '', description: '', province: project.province, subtotal: 0, gst: 0, pst: 0, tip: 0, notes: '' };
   const autoTax = r ? r.tax_auto : true;
-  const ai = r ? await getAi() : { enabled: false };
+  const isDraft = !!r?.draft;
+  const ai = r && !isDraft ? await getAi() : { enabled: false };
+  const vendorList = await api('GET', '/vendors').catch(() => []);
+  const vmap = indexByKey(vendorList);
 
   app.innerHTML = `<p><a href="#/p/${projectId}">← ${esc(project.name)}</a></p>
-    <h1>${r ? `Receipt #${pad(r.number)}` : 'New receipt'}</h1>
-    ${r ? '<div id="checkcard" class="card checkcard" hidden></div>' : ''}
+    <h1>${r ? (isDraft ? 'Review capture' : `Receipt #${pad(r.number)}`) : 'New receipt'}</h1>
+    ${isDraft ? '<div class="scanmsg warn">This quick capture is not filed yet — it is not counted in totals or reports. Check the details, then press <b>File receipt</b>.</div>' : ''}
+    ${r && !isDraft ? '<div id="checkcard" class="card checkcard" hidden></div>' : ''}
     <form id="f" class="card">
-      ${photoField(r?.has_image ? `/api/receipts/${r.id}/image` : '')}
+      ${photoField()}
       <div class="grid"><div><label>Date</label><input type="date" name="date" value="${esc(v.date)}" required></div>
-        <div><label>Vendor</label><input name="vendor" value="${esc(v.vendor)}" autocomplete="off"></div></div>
+        <div><label>Vendor</label><input name="vendor" list="vendors" value="${esc(v.vendor)}" autocomplete="off"><datalist id="vendors">${vendorList.slice(0, 200).map((x) => `<option value="${esc(x.name)}">`).join('')}</datalist></div></div>
       <label>Province of purchase</label><select name="province">${provOptions(v.province)}</select>
       <label>Category</label><input name="category" list="cats" value="${esc(v.category)}" autocomplete="off" placeholder="pick from the list or type your own">
       <datalist id="cats">${catOptions(meta.receipt_categories, meta.used_categories)}</datalist>
+      <div id="vmsg" class="muted small" hidden></div>
       <label>Description <span class="muted small">(fills from category; edit freely — used in the picture file name)</span></label>
       <input name="description" value="${esc(v.description)}" autocomplete="off">
       <label>Type</label><div class="toggle"><button type="button" data-b="1" class="${billable ? 'on' : ''}">Billable</button><button type="button" data-b="0" class="${billable ? '' : 'on'}">Non-billable</button></div>
@@ -467,7 +536,7 @@ async function viewReceiptForm({ projectId, receiptId }) {
       <div class="totalbar">Total <span id="tot">$0.00</span></div>
       <label>Notes</label><textarea name="notes" rows="2">${esc(v.notes)}</textarea>
       ${receiptId && allProjects.length > 1 ? `<label>Project</label><select name="project_id">${allProjects.map((p) => `<option value="${p.id}" ${p.id === projectId ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}</select>` : ''}
-      <div class="actions"><button class="pri" id="save">Save receipt</button>${r ? '<button type="button" class="danger" id="del">Delete</button>' : ''}</div>
+      <div class="actions"><button class="pri" id="save">${isDraft ? 'File receipt' : 'Save receipt'}</button>${isDraft ? '<button type="button" id="savedraft">Save draft</button>' : ''}${r ? '<button type="button" class="danger" id="del">Delete</button>' : ''}</div>
     </form>`;
 
   const form = $('#f');
@@ -492,6 +561,24 @@ async function viewReceiptForm({ projectId, receiptId }) {
   form.category.addEventListener('input', () => { if (!descCustom) { form.description.value = form.category.value; autoDesc = form.category.value; } });
   form.description.addEventListener('input', () => { descCustom = form.description.value !== '' && form.description.value !== autoDesc; });
 
+  // ---- vendor memory: a familiar store pre-fills its usual category / billable setting (never on an already-filed receipt)
+  let billableTouched = !!r && !isDraft;
+  const syncToggle = () => form.querySelectorAll('[data-b]').forEach((x) => x.classList.toggle('on', (x.dataset.b === '1') === billable));
+  const applyVendor = () => {
+    if (r && !isDraft) return;
+    const sug = suggestFor(vmap, form.vendor.value);
+    if (!sug) return;
+    const bits = [];
+    if (sug.category && !form.category.value) {
+      form.category.value = sug.category; form.category.dispatchEvent(new Event('input'));        // (the description follows the category)
+      form.category.classList.add('remembered'); form.category.addEventListener('input', () => form.category.classList.remove('remembered'), { once: true });
+      bits.push(`category ${sug.category}`);
+    }
+    if (sug.billable !== null && !billableTouched && billable !== !!sug.billable) { billable = !!sug.billable; syncToggle(); bits.push(billable ? 'billable' : 'non-billable'); }
+    if (bits.length) { $('#vmsg').textContent = `From your ${sug.entry.count} earlier ${sug.entry.name} receipts: ${bits.join(' and ')}.`; $('#vmsg').hidden = false; }
+  };
+  form.vendor.addEventListener('change', applyVendor);
+
   // ---- OCR result -> form fields
   const applyScan = (text) => {
     const p = parseReceiptText(text);
@@ -500,6 +587,7 @@ async function viewReceiptForm({ projectId, receiptId }) {
     const filled = [];
     const set = (label, ok) => { if (ok) filled.push(label); };
     set('vendor', scanFill(form.vendor, p.vendor));
+    applyVendor();                                           // history beats the keyword guess below
     set('date', scanFill(form.date, p.date, form.date.value === today()));
     if (p.category && !form.category.value) { form.category.value = p.category; form.category.classList.add('scanned'); form.category.dispatchEvent(new Event('input')); filled.push('category'); }
     const readTax = p.gst !== null || p.pst !== null || p.tax !== null;
@@ -514,10 +602,10 @@ async function viewReceiptForm({ projectId, receiptId }) {
     if (!filled.length) return showScanMsg('Couldn’t pick out any details. Try cropping closer to the text, or use 🔍 Read text again.', true);
     showScanMsg(`Filled from the photo: <b>${filled.join(', ')}</b>. Please check the highlighted fields${a.estimated ? ` — <b>${a.inferred.map((k) => ({ subtotal: 'subtotal', gst: 'GST/HST', pst: 'PST/QST' }[k])).join(' and ')}</b> couldn’t be read clearly and ${a.inferred.length > 1 ? 'were' : 'was'} worked out from the total, so double-check ${a.inferred.length > 1 ? 'them' : 'it'}` : ''}.${p.total !== null ? ` Receipt total read: <b>${money(p.total)}</b>.` : ''}`, a.estimated);
   };
-  const photo = wirePhoto(applyScan);
+  const photo = wirePhoto(applyScan, { kind: 'receipt', rec: r });
 
   // ---- second opinion from the local AI (existing receipts only; it checks the SAVED version)
-  if (r) {
+  if (r && !isDraft) {
     const USE = { subtotal: 'subtotal', gst: 'gst', pst: 'pst', tip: 'tip', date: 'date', vendor: 'vendor' };
     const card = $('#checkcard');
     const renderCheck = () => {
@@ -565,35 +653,158 @@ async function viewReceiptForm({ projectId, receiptId }) {
   }
 
   form.querySelectorAll('[data-b]').forEach((b) => (b.onclick = () => {
-    billable = b.dataset.b === '1';
-    form.querySelectorAll('[data-b]').forEach((x) => x.classList.toggle('on', x === b));
+    billable = b.dataset.b === '1'; billableTouched = true; syncToggle();
   }));
+
+  let keepDraft = false;
+  if ($('#savedraft')) $('#savedraft').onclick = () => { keepDraft = true; form.requestSubmit(); };
+  /** After filing a draft, go straight to the next one waiting in the Inbox. */
+  const goNext = async () => {
+    const inbox = await api('GET', '/inbox').catch(() => []);
+    const next = inbox.find((d) => d.id > r.id) || inbox.find((d) => d.id !== r.id);
+    if (next) { toast(`Filed — ${inbox.length - 1} more in the Inbox`); location.hash = `#/r/${next.id}`; }
+    else { toast('Filed — the Inbox is empty'); location.hash = `#/p/${projectId}`; }
+  };
 
   form.onsubmit = async (ev) => {
     ev.preventDefault();
     const data = { date: form.date.value, vendor: form.vendor.value, province: form.province.value, category: form.category.value.trim(),
       description: form.description.value, billable, tax_auto: $('#taxauto').checked,
       subtotal: g('subtotal'), gst: g('gst'), pst: g('pst'), tip: g('tip'), notes: form.notes.value };
+    const filing = isDraft && !keepDraft; keepDraft = false;
     $('#save').disabled = true;
     try {
-      if (photo.text) data.ocr_text = photo.text;          // kept for search and the AI check
       if (r) {
-        if (photo.data) data.image = photo.data; else if (photo.remove) data.remove_image = true;
+        Object.assign(data, photo.payload(false));
         if (form.project_id) data.project_id = Number(form.project_id.value);
-        await api('PATCH', `/receipts/${r.id}`, data);
-      } else {
-        if (photo.data) data.image = photo.data;
-        const out = await createRecord(`/projects/${projectId}/receipts`, data,
-          { project_id: projectId, label: data.description || data.category || data.vendor || 'Receipt' });
-        if (out === 'cancelled') { $('#save').disabled = false; return; }
+        if (filing) data.draft = false;
+        try { await api('PATCH', `/receipts/${r.id}`, data); }
+        catch (e) {
+          if (e.status === 409 && e.data?.duplicates) {
+            if (!confirm(`This looks like a duplicate of:\n\n${e.data.duplicates.map(dupText).join('\n')}\n\nFile it anyway?`)) { $('#save').disabled = false; return; }
+            await api('PATCH', `/receipts/${r.id}`, { ...data, allow_duplicate: true });
+          } else throw e;
+        }
+        if (filing) return await goNext();
+        location.hash = isDraft ? '#/inbox' : `#/p/${data.project_id || projectId}`;
+        return;
       }
+      Object.assign(data, photo.payload(true));
+      const out = await createRecord(`/projects/${projectId}/receipts`, data,
+        { project_id: projectId, label: data.description || data.category || data.vendor || 'Receipt' });
+      if (out === 'cancelled') { $('#save').disabled = false; return; }
       location.hash = `#/p/${projectId}`;
     } catch (e) { toast(isNetworkError(e) ? 'Editing needs a connection' : e.message, true); $('#save').disabled = false; }
   };
   if ($('#del')) $('#del').onclick = async () => {
-    if (!confirm('Delete this receipt?')) return;
-    await api('DELETE', `/receipts/${r.id}`); location.hash = `#/p/${projectId}`;
+    if (!confirm(isDraft ? 'Delete this capture?' : 'Delete this receipt?')) return;
+    await api('DELETE', `/receipts/${r.id}`); location.hash = isDraft ? '#/inbox' : `#/p/${projectId}`;
   };
+}
+
+// ------------------------------------------------------------------ inbox + quick capture
+const draftCard = (d) => `<div class="card row" style="flex-wrap:nowrap" data-draft="${d.id}">
+    <a class="row grow" href="#/r/${d.id}" style="flex-wrap:nowrap;color:inherit;text-decoration:none">${thumb('receipt', d)}
+      <div class="grow"><div class="spread"><b>${esc(d.vendor || 'Not read yet')}</b><span class="money">${d.total ? money(d.total) : ''}</span></div>
+      <div class="muted small">${esc(d.project_name || '')} · ${esc(d.date)}${d.category ? ' · ' + esc(d.category) : ''}</div>
+      <span class="pill pending">Draft — tap to review</span></div></a></div>`;
+
+async function viewInbox() {
+  const drafts = await api('GET', '/inbox');
+  app.innerHTML = `<p><a href="#/">← Projects</a></p><h1>Inbox</h1>
+    <p class="muted">Quick captures waiting for review. They are <b>not</b> in totals or reports until you file them.</p>
+    <div class="actions"><a class="btn pri" href="#/capture">⚡ Capture more</a>${drafts.length ? `<a class="btn" href="#/r/${drafts[0].id}">Review them one by one →</a>` : ''}</div>
+    ${drafts.map(draftCard).join('') || '<p class="muted">The Inbox is empty.</p>'}`;
+}
+
+async function viewCapture() {
+  const projects = (await api('GET', '/projects')).filter((p) => !p.archived);
+  if (!projects.length) { app.innerHTML = '<h1>Quick capture</h1><p class="muted">Create a project first, then come back.</p><a class="btn pri" href="#/">Go to Projects</a>'; return; }
+  const vmap = indexByKey(await api('GET', '/vendors').catch(() => []));
+  const last = Number(localStorage.getItem('qc-project')), pick = projects.find((p) => p.id === last) || projects[0];
+  let billable = localStorage.getItem('qc-billable') !== '0';
+  const session = [];                                    // this visit: { id, thumb, state, info }
+  let ocrChain = Promise.resolve(), inboxCount = (await api('GET', '/inbox').catch(() => [])).length;
+
+  app.innerHTML = `<h1>Quick capture</h1>
+    <p class="muted">Snap receipts one after another — no forms. Each is cropped automatically, read in the background and saved to your <a href="#/inbox">Inbox</a> to review later.</p>
+    <div class="card">
+      <label>Add to project</label><select id="qc-project">${projects.map((p) => `<option value="${p.id}" ${p.id === pick.id ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}</select>
+      <label>Usually</label><div class="toggle"><button type="button" data-b="1" class="${billable ? 'on' : ''}">Billable</button><button type="button" data-b="0" class="${billable ? '' : 'on'}">Non-billable</button></div>
+      <div class="muted small">Stores you've used before keep their usual setting.</div>
+      <label class="check"><input type="checkbox" id="qc-ocr" ${localStorage.getItem('ocr-on') !== '0' ? 'checked' : ''}> Read the text in the background (on this device)</label>
+      <label class="check"><input type="checkbox" id="qc-review" ${localStorage.getItem('qc-review') === '1' ? 'checked' : ''}> Let me adjust the crop for each photo (slower — originals are not kept)</label></div>
+    <div class="actions"><label class="btn pri bigbtn">📷 Capture<input id="qc-cam" type="file" accept="image/*" capture="environment" hidden></label>
+      <label class="btn">🖼 Add from gallery<input id="qc-pick" type="file" accept="image/*" multiple hidden></label></div>
+    <div id="qc-list"></div>
+    <div class="actions"><a class="btn" href="#/inbox" id="qc-inbox"></a></div>`;
+
+  const STATE = { reading: ['reading…', 'pending'], saving: ['saving…', 'pending'], waiting: ['waiting to sync', 'pending'], saved: ['✓ in Inbox', ''], attention: ['needs attention', 'bad'] };
+  const render = () => {
+    if (!$('#qc-list')) return;                                              // navigated away while a photo was still being processed
+    $('#qc-list').innerHTML = session.map((e) => `<div class="card row" style="flex-wrap:nowrap"><img class="thumb" src="${e.thumb}" alt="">
+      <div class="grow"><b>${esc(e.info || 'Capture')}</b><div><span class="pill ${STATE[e.state][1]}">${STATE[e.state][0]}</span></div></div></div>`).join('');
+    $('#qc-inbox').textContent = `📥 Open Inbox${inboxCount ? ` (${inboxCount})` : ''}`;
+  };
+  const refreshStates = async () => {
+    const q = await queueAll();
+    for (const e of session) {
+      const item = q.find((x) => x.client_id === e.id);
+      if (!item) { if (e.state !== 'saved') { e.state = 'saved'; inboxCount++; } }
+      else e.state = item.hold ? 'reading' : item.error ? 'attention' : 'waiting';
+    }
+    render();
+  };
+
+  const onQueueChanged = () => { if (!$('#qc-list')) removeEventListener('queue-changed', onQueueChanged); else refreshStates(); };
+  addEventListener('queue-changed', onQueueChanged);                         // e.g. the connection came back and the queue synced by itself
+
+  const processCapture = async (entry, canvas, project, base, ocr) => {
+    let data = base;
+    if (ocr) {
+      try {
+        const text = await scanCanvas(canvas);                               // the same on-device reader as the forms
+        const f = fieldsFromScan(text, meta.provinces, project.province, today());
+        data = { ...base, ...f.data, ocr_text: text };
+        const sug = suggestFor(vmap, data.vendor);                           // history beats the keyword guess
+        if (sug?.category) data.category = sug.category;
+        if (sug && sug.billable !== null) data.billable = !!sug.billable;
+        const sum = (data.subtotal || 0) + (data.gst || 0) + (data.pst || 0) + (data.tip || 0);
+        entry.info = [data.vendor, sum ? money(sum) : ''].filter(Boolean).join(' · ');
+      } catch { entry.info = 'could not read the text'; }
+    }
+    const item = (await queueAll()).find((x) => x.client_id === entry.id);
+    if (item) await queuePut({ ...item, data, hold: false });                // release: now it may sync
+    entry.state = 'saving'; render();
+    await flushQueue(); await refreshStates();
+  };
+
+  const capture = async (file) => {
+    const project = projects.find((p) => String(p.id) === $('#qc-project').value);
+    const ocr = $('#qc-ocr').checked;
+    let res;
+    try { res = $('#qc-review').checked ? await openCropper(file) : await autoCropFile(file); }
+    catch (e) { toast(e.message, true); return; }
+    if (!res) return;
+    const client_id = uuid();
+    const base = { draft: true, date: today(), province: project.province, billable, images: [res.dataUrl] };
+    const entry = { id: client_id, thumb: canvasToJpeg(res.canvas, 160, 0.6), state: ocr ? 'reading' : 'saving', info: '' };
+    session.unshift(entry); render();
+    // persisted on the device immediately (held while it is being read), so nothing is lost if the page is closed or the network drops
+    await queuePut({ client_id, url: `/projects/${project.id}/receipts`, project_id: project.id, data: base, label: 'Capture', hold: true, created: Date.now() });
+    ocrChain = ocrChain.then(() => processCapture(entry, res.canvas, project, base, ocr));   // one read at a time; you can keep shooting
+  };
+  const onFiles = async (ev) => { const files = [...ev.target.files]; ev.target.value = ''; for (const f of files) await capture(f); };
+  $('#qc-cam').onchange = onFiles; $('#qc-pick').onchange = onFiles;
+  $('#qc-project').onchange = (ev) => localStorage.setItem('qc-project', ev.target.value);
+  $('#qc-review').onchange = (ev) => localStorage.setItem('qc-review', ev.target.checked ? '1' : '0');
+  $('#qc-ocr').onchange = (ev) => { localStorage.setItem('ocr-on', ev.target.checked ? '1' : '0'); if (ev.target.checked) warmOcr(); };
+  app.querySelectorAll('[data-b]').forEach((b) => (b.onclick = () => {
+    billable = b.dataset.b === '1'; localStorage.setItem('qc-billable', billable ? '1' : '0');
+    app.querySelectorAll('[data-b]').forEach((x) => x.classList.toggle('on', x === b));
+  }));
+  if ($('#qc-ocr').checked) warmOcr();
+  render();
 }
 
 // ------------------------------------------------------------------ search + filters (household items and receipts)
@@ -686,7 +897,7 @@ function warrantyPill(i) {
   return { text: `Covered until ${i.warranty_expires}`, cls: '' };
 }
 const itemRow = (i) => { const w = warrantyPill(i); return `<a class="card row" href="#/household/${i.id}" style="flex-wrap:nowrap">
-    ${i.has_image ? `<img class="thumb" loading="lazy" src="/api/items/${i.id}/image" alt="">` : '<div class="thumb"></div>'}
+    ${thumb('item', i)}
     <div class="grow"><div class="spread"><b>${esc(i.name)}</b><span class="money">${i.price ? money(i.price) : ''}</span></div>
     <div class="muted small">Bought ${esc(i.purchase_date)}${i.vendor ? ' · ' + esc(i.vendor) : ''}${i.category ? ' · ' + esc(i.category) : ''}</div>
     <span class="pill ${w.cls}">${esc(w.text)}</span></div></a>`; };
@@ -701,7 +912,7 @@ async function viewItems() {
 }
 
 const receiptRow = (r) => `<a class="card row" href="#/r/${r.id}" style="flex-wrap:nowrap">
-    ${r.has_image ? `<img class="thumb" loading="lazy" src="/api/receipts/${r.id}/image" alt="">` : '<div class="thumb"></div>'}
+    ${thumb('receipt', r)}
     <div class="grow"><div class="spread"><b>#${pad(r.number)} ${esc(r.description || r.vendor || 'Receipt')}</b><span class="money"><b>${money(r.total)}</b></span></div>
     <div class="muted small">${esc(r.project_name)} · ${esc(r.date)}${r.vendor ? ' · ' + esc(r.vendor) : ''}${r.category ? ' · ' + esc(r.category) : ''}</div>
     <div class="row small"><span class="pill ${r.billable ? '' : 'nb'}">${r.billable ? 'Billable' : 'Non-billable'}</span>${r.billable && r.billing_status !== 'unbilled' ? `<span class="pill pending">${esc(r.billing_status)}${r.invoice_ref ? ' ' + esc(r.invoice_ref) : ''}</span>` : ''}</div></div></a>`;
@@ -714,17 +925,18 @@ async function viewSearch() {
 
 async function viewItemForm({ itemId }) {
   const i = itemId ? await api('GET', `/items/${itemId}`) : null;
+  const vendorList = await api('GET', '/vendors?scope=items').catch(() => []), vmap = indexByKey(vendorList);
   const v = i || { name: '', category: '', purchase_date: today(), vendor: '', price: 0, warranty_months: null, serial: '', notes: '' };
   const yrs = v.warranty_months && v.warranty_months % 12 === 0;
   const wval = v.warranty_months ? (yrs ? v.warranty_months / 12 : v.warranty_months) : '';
 
   app.innerHTML = `<p><a href="#/household">← Household</a></p><h1>${i ? esc(i.name) : 'New item'}</h1>
     <form id="f" class="card">
-      ${photoField(i?.has_image ? `/api/items/${i.id}/image` : '')}
+      ${photoField()}
       <label>Item</label><input name="name" value="${esc(v.name)}" required placeholder="e.g. Samsung 65&quot; TV">
       <div class="grid"><div><label>Purchase date</label><input type="date" name="purchase_date" value="${esc(v.purchase_date)}" required></div>
         <div><label>Price</label><input name="price" inputmode="decimal" value="${fromCents(v.price)}" placeholder="0.00"></div></div>
-      <div class="grid"><div><label>Vendor</label><input name="vendor" value="${esc(v.vendor)}"></div>
+      <div class="grid"><div><label>Vendor</label><input name="vendor" list="ivendors" value="${esc(v.vendor)}" autocomplete="off"><datalist id="ivendors">${vendorList.slice(0, 200).map((x) => `<option value="${esc(x.name)}">`).join('')}</datalist></div>
         <div><label>Category</label><input name="category" list="icats" value="${esc(v.category)}"><datalist id="icats">${catOptions(meta.item_categories)}</datalist></div></div>
       <label>Warranty length <span class="muted small">(leave blank if unknown)</span></label>
       <div class="grid"><input name="wnum" inputmode="numeric" value="${wval}" placeholder="e.g. 2">
@@ -744,16 +956,23 @@ async function viewItemForm({ itemId }) {
     $('#wends').textContent = `Warranty ends ${d.toISOString().slice(0, 10)}`;
   };
   ['wnum', 'wunit', 'purchase_date'].forEach((n) => form[n].addEventListener('input', showEnds)); showEnds();
+  // vendor memory: a store you have bought from before suggests its usual category (new items only)
+  const applyVendor = () => {
+    if (i || form.category.value) return;
+    const sug = suggestFor(vmap, form.vendor.value);
+    if (sug?.category) { form.category.value = sug.category; form.category.classList.add('remembered'); form.category.addEventListener('input', () => form.category.classList.remove('remembered'), { once: true }); }
+  };
+  form.vendor.addEventListener('change', applyVendor);
 
   const photo = wirePhoto((text) => {                      // OCR: purchase date, vendor and price (the receipt total)
     const p = parseReceiptText(text);
     const price = p.total ?? (p.subtotal !== null ? p.subtotal + (p.gst ?? 0) + (p.pst ?? 0) + (p.tip ?? 0) : null);
     const filled = [];
-    if (scanFill(form.vendor, p.vendor)) filled.push('vendor');
+    if (scanFill(form.vendor, p.vendor)) { filled.push('vendor'); applyVendor(); }
     if (scanFill(form.purchase_date, p.date, form.purchase_date.value === today())) { filled.push('date'); showEnds(); }
     if (price !== null && scanFill(form.price, fromCents(price))) filled.push('price');
     showScanMsg(filled.length ? `Filled from the photo: <b>${filled.join(', ')}</b>. Check the highlighted fields, then add the item name.` : 'Couldn’t pick out any details from that photo.', !filled.length);
-  });
+  }, { kind: 'item', rec: i });
 
   form.onsubmit = async (ev) => {
     ev.preventDefault();
@@ -761,12 +980,10 @@ async function viewItemForm({ itemId }) {
       price: toCents(form.price.value), warranty_months: months(), serial: form.serial.value, notes: form.notes.value };
     $('#save').disabled = true;
     try {
-      if (photo.text) data.ocr_text = photo.text;
+      Object.assign(data, photo.payload(!i));
       if (i) {
-        if (photo.data) data.image = photo.data; else if (photo.remove) data.remove_image = true;
         await api('PATCH', `/items/${i.id}`, data);
       } else {
-        if (photo.data) data.image = photo.data;
         const out = await createRecord('/items', data, { label: data.name });
         if (out === 'cancelled') { $('#save').disabled = false; return; }
       }
@@ -825,8 +1042,13 @@ async function viewSettings() {
         <input name="remote" value="${esc(bk.config.remote)}" placeholder="gdrive:ReceiptBoss" autocapitalize="none">
         <label>Also copy to folder on the server <span class="muted small">(optional; e.g. a NAS or Drive-for-desktop folder)</span></label>
         <input name="copy_dir" value="${esc(bk.config.copy_dir)}" placeholder="/mnt/nas/receipt-boss-backups" autocapitalize="none">
+        <label class="check"><input type="checkbox" name="encrypt" ${bk.config.encrypt ? 'checked' : ''}> 🔒 Encrypt backups with a passphrase (AES-256) before they are saved or uploaded</label>
+        <label>Passphrase <span class="muted small">10+ characters. <b>If you lose it, encrypted backups cannot be opened</b> — keep it in your password manager.</span></label>
+        <input name="passphrase" type="password" autocomplete="new-password" placeholder="${bk.config.has_passphrase ? 'saved — leave blank to keep it' : ''}">
+        ${bk.config.has_passphrase ? '<label class="check"><input type="checkbox" name="clear_passphrase"> Remove the saved passphrase (turns encryption off)</label>' : ''}
         <div class="actions"><button class="pri">Save backup settings</button><button type="button" id="bkrun">Back up now</button><a class="btn" href="/api/backup/download">⬇ Download backup</a></div></form>
-      ${bk.files.length ? `<div class="muted small">On this server: ${bk.files.map((f) => `<a href="/api/backup/files/${f.name}">${esc(f.name.replace('receipt-boss-backup-', '').replace('.zip', ''))}</a> (${(f.size / 1048576).toFixed(1)} MB)`).join(' · ')}</div>` : ''}
+      ${bk.files.some((f) => f.name.endsWith('.enc')) ? `<div class="row" style="margin-top:10px"><input id="vpass" type="password" placeholder="Passphrase to test" autocomplete="off" style="flex:1;min-width:0"><button type="button" id="vbtn">Verify I can decrypt</button></div><div id="vout" class="small"></div>` : ''}
+      ${bk.files.length ? `<div class="muted small" style="margin-top:8px">On this server: ${bk.files.map((f) => `<a href="/api/backup/files/${f.name}">${f.name.endsWith('.enc') ? '🔒 ' : ''}${esc(f.name.replace('receipt-boss-backup-', '').replace('.zip.enc', '').replace('.zip', ''))}</a> (${(f.size / 1048576).toFixed(1)} MB)`).join(' · ')}</div>` : ''}
     </div>` : ''}`;
 
   $('#out').onclick = logout;
@@ -867,9 +1089,15 @@ async function viewSettings() {
   };
   $('#bk').onsubmit = guard(async (ev) => {
     ev.preventDefault(); const f = new FormData(ev.target);
-    await api('PUT', '/backup', { enabled: !!f.get('enabled'), interval_hours: Number(f.get('interval_hours')), keep: Number(f.get('keep')), remote: f.get('remote'), copy_dir: f.get('copy_dir') });
+    await api('PUT', '/backup', { enabled: !!f.get('enabled'), interval_hours: Number(f.get('interval_hours')), keep: Number(f.get('keep')), remote: f.get('remote'), copy_dir: f.get('copy_dir'),
+      encrypt: !!f.get('encrypt'), passphrase: f.get('passphrase'), clear_passphrase: !!f.get('clear_passphrase') });
     toast('Backup settings saved');
   });
+  if ($('#vbtn')) $('#vbtn').onclick = async () => {
+    const out = $('#vout'); out.className = 'small muted'; out.textContent = 'Checking… (large backups take a moment)';
+    try { const r = await api('POST', '/backup/verify', { passphrase: $('#vpass').value }); out.className = 'small'; out.style.color = 'var(--pri-d)'; out.textContent = `✓ That passphrase opens ${r.name}.`; }
+    catch (e) { out.className = 'small errtext'; out.style.color = ''; out.textContent = '✗ ' + e.message; }
+  };
   $('#bkrun').onclick = guard(async () => {
     $('#bkrun').disabled = true; toast('Backing up…');
     try { const r = await api('POST', '/backup/run', {}); toast(r.message); }
@@ -879,6 +1107,7 @@ async function viewSettings() {
 
 // ------------------------------------------------------------------ boot
 async function start() {
+  for (const it of await queueAll()) if (it.hold && Date.now() - (it.created || 0) > 10 * 60e3) await queuePut({ ...it, hold: false });
   renderNav('projects');
   await renderBanner();
   route();

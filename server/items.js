@@ -1,12 +1,13 @@
 // Household purchases tracked for warranty (TV, fridge, laptop...). Shared by every account in the house.
 import path from 'node:path';
-import { db } from './db.js';
-import { err, str, cents, dateStr, decodeImage, saveImage, rmImage, imageFile } from './http.js';
+import { db, tx } from './db.js';
+import { err, str, cents, dateStr, rmImage, imageFile } from './http.js';
+import { photosOf, photosMap, ownsPhoto, applyPhotoChanges } from './photos.js';
 import { warrantyExpiry } from './tax.js';
 import { csvCell, plain, slug } from './util.js';
 
-const pub = (i) => ({
-  ...i, has_image: !!i.image, image: undefined,
+const pub = ({ photos, ...i }) => ({
+  ...i, has_image: !!i.image, image: undefined, photos: (photos || []).map((x) => x.id),
   warranty_expires: warrantyExpiry(i.purchase_date, i.warranty_months),
 });
 
@@ -16,6 +17,7 @@ export function registerItems(app) {
     if (!i) throw err(404, 'item not found');
     return i;
   };
+  const full = (i) => pub({ ...i, photos: photosOf('item', i.id) });
   const months = (v) => {
     if (v === null || v === '' || v === undefined) return null;
     const n = Number(v);
@@ -24,7 +26,8 @@ export function registerItems(app) {
   };
 
   app.get('/api/items', (req, res) => {
-    res.json(db.prepare('SELECT * FROM items ORDER BY purchase_date DESC, id DESC').all().map(pub));
+    const rows = db.prepare('SELECT * FROM items ORDER BY purchase_date DESC, id DESC').all(), m = photosMap('item', rows.map((r) => r.id));
+    res.json(rows.map((r) => pub({ ...r, photos: m[r.id] || [] })));
   });
 
   app.get('/api/items.csv', (req, res) => {
@@ -40,7 +43,7 @@ export function registerItems(app) {
     const clientId = b.client_id ? str(b.client_id, 80) : null;
     if (clientId) {
       const dup = db.prepare('SELECT * FROM items WHERE client_id = ?').get(clientId);
-      if (dup) return res.json(pub(dup));
+      if (dup) return res.json(full(dup));
     }
     const name = str(b.name, 200);
     if (!name) throw err(400, 'name is required');
@@ -49,26 +52,24 @@ export function registerItems(app) {
       const duplicates = db.prepare('SELECT id, name, purchase_date, price FROM items WHERE lower(name) = lower(?) AND purchase_date = ? AND price = ?').all(name, date, price);
       if (duplicates.length) throw err(409, 'This looks like an item you already added', { duplicates });
     }
-    const image = b.image ? saveImage(decodeImage(b.image)) : null;
-    try {
-      const r = db.prepare(`INSERT INTO items (created_by, client_id, name, category, purchase_date, vendor, price, warranty_months, serial, notes, image, ocr_text)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`).run(req.user.id, clientId, name, str(b.category, 60), date, str(b.vendor, 200),
-        price, months(b.warranty_months), str(b.serial, 200), str(b.notes, 2000), image, str(b.ocr_text, 8000));
-      res.status(201).json(pub(get(r.lastInsertRowid)));
-    } catch (e) { rmImage(image); throw e; }
+    const created = tx(() => {
+      const r = db.prepare(`INSERT INTO items (created_by, client_id, name, category, purchase_date, vendor, price, warranty_months, serial, notes, ocr_text)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?)`).run(req.user.id, clientId, name, str(b.category, 60), date, str(b.vendor, 200),
+        price, months(b.warranty_months), str(b.serial, 200), str(b.notes, 2000), str(b.ocr_text, 8000));
+      applyPhotoChanges('item', r.lastInsertRowid, b, { create: true });
+      return get(r.lastInsertRowid);
+    });
+    res.status(201).json(full(created));
   });
 
-  app.get('/api/items/:id', (req, res) => res.json(pub(get(req.params.id))));
+  app.get('/api/items/:id', (req, res) => res.json(full(get(req.params.id))));
 
   app.patch('/api/items/:id', (req, res) => {
     const i = get(req.params.id);
     const b = req.body || {};
-    let image = i.image;
-    if (b.image) image = saveImage(decodeImage(b.image));
-    else if (b.remove_image) image = null;
     const name = b.name !== undefined ? str(b.name, 200) : i.name;
     if (!name) throw err(400, 'name is required');
-    db.prepare(`UPDATE items SET name=?, category=?, purchase_date=?, vendor=?, price=?, warranty_months=?, serial=?, notes=?, image=?, ocr_text=? WHERE id=?`).run(
+    db.prepare(`UPDATE items SET name=?, category=?, purchase_date=?, vendor=?, price=?, warranty_months=?, serial=?, notes=?, ocr_text=? WHERE id=?`).run(
       name,
       b.category !== undefined ? str(b.category, 60) : i.category,
       b.purchase_date !== undefined ? dateStr(b.purchase_date) : i.purchase_date,
@@ -77,24 +78,26 @@ export function registerItems(app) {
       b.warranty_months !== undefined ? months(b.warranty_months) : i.warranty_months,
       b.serial !== undefined ? str(b.serial, 200) : i.serial,
       b.notes !== undefined ? str(b.notes, 2000) : i.notes,
-      image, b.ocr_text !== undefined ? str(b.ocr_text, 8000) : i.ocr_text, i.id);
-    if (image !== i.image) rmImage(i.image);
-    res.json(pub(get(i.id)));
+      b.ocr_append ? `${i.ocr_text}\n\n${str(b.ocr_append, 8000)}`.trim().slice(0, 8000) : b.ocr_text !== undefined ? str(b.ocr_text, 8000) : i.ocr_text, i.id);
+    applyPhotoChanges('item', i.id, b);
+    res.json(full(get(i.id)));
   });
 
   app.delete('/api/items/:id', (req, res) => {
     const i = get(req.params.id);
+    const files = photosOf('item', i.id).map((x) => x.file);
     db.prepare('DELETE FROM items WHERE id = ?').run(i.id);
-    rmImage(i.image);
+    files.forEach(rmImage);
     res.status(204).end();
   });
 
-  app.get('/api/items/:id/image', (req, res) => {
-    const i = get(req.params.id);
-    const file = imageFile(i.image);
-    if (!file) throw err(404, 'no image');
-    res.setHeader('Cache-Control', 'private, max-age=31536000, immutable');
+  const send = (res, i, file, immutable = true) => {
+    const f = imageFile(file);
+    if (!f) throw err(404, 'no image');
+    res.setHeader('Cache-Control', immutable ? 'private, max-age=31536000, immutable' : 'private, no-cache');   // the cover URL is mutable
     res.setHeader('Content-Disposition', `inline; filename="${slug(i.name) || 'item'}.jpg"`);
-    res.type('image/jpeg').sendFile(path.resolve(file));
-  });
+    res.type('image/jpeg').sendFile(path.resolve(f));
+  };
+  app.get('/api/items/:id/image', (req, res) => { const i = get(req.params.id); send(res, i, i.image, false); });   // the cover
+  app.get('/api/items/:id/photos/:pid', (req, res) => { const i = get(req.params.id); send(res, i, ownsPhoto('item', i.id, Number(req.params.pid))); });
 }

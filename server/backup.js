@@ -14,9 +14,10 @@ import { DatabaseSync } from 'node:sqlite';
 import { db, DATA_DIR, IMAGE_DIR, BACKUP_DIR, getSetting, setSetting } from './db.js';
 import { err, wrap } from './http.js';
 import { requireAdmin } from './auth.js';
+import { encryptFile, decryptFile, looksEncrypted } from './crypto-backup.js';
 
 const run = promisify(execFile);
-const NAME_RE = /^receipt-boss-backup-\d{8}-\d{6}\.zip$/;
+const NAME_RE = /^receipt-boss-backup-\d{8}-\d{6}\.zip(\.enc)?$/;
 const REMOTE_RE = /^[A-Za-z0-9_.-]+:[^\0\r\n]*$/; // rclone "remote:path"
 
 export const backupConfig = () => ({
@@ -25,7 +26,10 @@ export const backupConfig = () => ({
   keep: Number(getSetting('backup.keep', '14')),
   remote: getSetting('backup.remote', ''),
   copy_dir: getSetting('backup.copy_dir', ''),
+  encrypt: getSetting('backup.encrypt', '0') === '1' && !!getSetting('backup.passphrase', ''),
+  has_passphrase: !!getSetting('backup.passphrase', ''),         // the passphrase itself is never sent to the browser
 });
+const passphraseIfEncrypting = () => (backupConfig().encrypt ? getSetting('backup.passphrase', '') : '');
 export const backupStatus = () => ({
   last_at: getSetting('backup.last_at', ''),
   last_ok: getSetting('backup.last_ok', ''),
@@ -37,18 +41,19 @@ const stamp = () => new Date().toISOString().replace(/[-:]/g, '').replace('T', '
 const sqlQuote = (s) => `'${s.replace(/'/g, "''")}'`;
 
 /** Create a backup zip at `dest`. Safe while the server is running (uses VACUUM INTO). */
-export async function createBackup(dest) {
+export async function createBackup(dest, { passphrase = '' } = {}) {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'rb-backup-'));
   try {
     const snap = path.join(tmp, 'receipts.db');
     db.exec(`VACUUM INTO ${sqlQuote(snap)}`);
     const copy = new DatabaseSync(snap);
-    copy.exec("DELETE FROM sessions; DELETE FROM settings WHERE key = 'ai.api_key'"); // never ship login sessions or the AI key around
+    copy.exec("DELETE FROM sessions; DELETE FROM settings WHERE key IN ('ai.api_key', 'backup.passphrase')"); // never ship login sessions, the AI key or the backup passphrase
     copy.close();
 
     fs.mkdirSync(path.dirname(dest), { recursive: true });
+    const zipPath = passphrase ? path.join(tmp, 'backup.zip') : dest;      // encrypted: zip in the temp dir first, then encrypt to dest
     await new Promise((resolve, reject) => {
-      const out = fs.createWriteStream(dest);
+      const out = fs.createWriteStream(zipPath);
       const zip = archiver('zip', { zlib: { level: 6 } });
       out.on('close', resolve); out.on('error', reject); zip.on('error', reject);
       zip.pipe(out);
@@ -57,6 +62,7 @@ export async function createBackup(dest) {
       zip.append(JSON.stringify({ app: 'receipt-boss', created: new Date().toISOString(), format: 1 }, null, 2), { name: 'manifest.json' });
       zip.finalize();
     });
+    if (passphrase) await encryptFile(zipPath, dest, passphrase);
     return { file: dest, size: fs.statSync(dest).size };
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });
@@ -81,9 +87,10 @@ export async function runBackup() {
   const steps = [];
   let ok = true;
   try {
-    const name = `receipt-boss-backup-${stamp()}.zip`;
-    const { file, size } = await createBackup(path.join(BACKUP_DIR, name));
-    steps.push(`saved ${name} (${(size / 1048576).toFixed(1)} MB)`);
+    const pass = passphraseIfEncrypting();
+    const name = `receipt-boss-backup-${stamp()}.zip${pass ? '.enc' : ''}`;
+    const { file, size } = await createBackup(path.join(BACKUP_DIR, name), { passphrase: pass });
+    steps.push(`saved ${name}${pass ? ' (encrypted)' : ''} (${(size / 1048576).toFixed(1)} MB)`);
 
     for (const old of listLocalBackups().slice(cfg.keep)) fs.rmSync(path.join(BACKUP_DIR, old.name), { force: true });
 
@@ -150,7 +157,13 @@ export function registerBackup(app) {
     const hours = Number(b.interval_hours), keep = Number(b.keep);
     if (!(hours >= 1 && hours <= 24 * 30)) throw err(400, 'interval must be 1 hour to 30 days');
     if (!(Number.isInteger(keep) && keep >= 1 && keep <= 365)) throw err(400, 'keep must be 1-365');
+    // encryption: the passphrase is write-only; enabling needs one (already saved, or sent now)
+    const newPass = typeof b.passphrase === 'string' ? b.passphrase : '';
+    if (newPass && newPass.length < 10) throw err(400, 'the backup passphrase must be at least 10 characters');
+    if (b.encrypt && !newPass && !getSetting('backup.passphrase', '')) throw err(400, 'enter a passphrase to turn on encryption');
     setSetting('backup.enabled', b.enabled ? '1' : '0');
+    if (b.clear_passphrase) { setSetting('backup.passphrase', ''); setSetting('backup.encrypt', '0'); }
+    else { if (newPass) setSetting('backup.passphrase', newPass); setSetting('backup.encrypt', b.encrypt ? '1' : '0'); }
     setSetting('backup.interval_hours', hours);
     setSetting('backup.keep', keep);
     setSetting('backup.remote', remote);
@@ -165,9 +178,20 @@ export function registerBackup(app) {
 
   // On-demand download of a fresh backup (straight to your device).
   app.get('/api/backup/download', requireAdmin, wrap(async (req, res) => {
-    const tmp = path.join(os.tmpdir(), `rb-dl-${process.pid}-${Date.now()}.zip`);
-    await createBackup(tmp);
-    res.download(tmp, `receipt-boss-backup-${stamp()}.zip`, () => fs.rmSync(tmp, { force: true }));
+    const pass = passphraseIfEncrypting(), ext = pass ? '.zip.enc' : '.zip';
+    const tmp = path.join(os.tmpdir(), `rb-dl-${process.pid}-${Date.now()}${ext}`);
+    await createBackup(tmp, { passphrase: pass });
+    res.download(tmp, `receipt-boss-backup-${stamp()}${ext}`, () => fs.rmSync(tmp, { force: true }));
+  }));
+
+  // prove you can still decrypt: checks a saved encrypted backup against a passphrase you type (nothing is stored or restored)
+  app.post('/api/backup/verify', requireAdmin, wrap(async (req, res) => {
+    const pass = String(req.body?.passphrase ?? '');
+    const name = listLocalBackups().find((f) => f.name.endsWith('.enc') && (!req.body?.name || f.name === req.body.name))?.name;
+    if (!name) throw err(400, 'there is no encrypted backup on this server yet — run “Back up now” first');
+    try { await decryptFile(path.join(BACKUP_DIR, name), null, pass); }
+    catch (e) { throw err(400, e.message); }
+    res.json({ ok: true, name });
   }));
 
   app.get('/api/backup/files/:name', requireAdmin, (req, res) => {

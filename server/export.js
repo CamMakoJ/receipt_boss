@@ -4,7 +4,8 @@ import { imageFile } from './http.js';
 import { calcTax } from './tax.js';
 import { total, sumReceipts, money, plain, csvCell, imageName, slug } from './util.js';
 
-const hasImage = (r) => !!imageFile(r.image);
+/** On-disk photo files of a receipt, in order (`files` is attached by the export route; `image` is the cover fallback). */
+const filesOf = (r) => (r.files?.length ? r.files : r.image ? [r.image] : []).filter((f) => imageFile(f));
 
 /**
  * Report-time tax fill-in: receipts saved with no GST/PST at all get taxes estimated from their own
@@ -24,7 +25,7 @@ export function buildCsv(project, receipts) {
   const rows = receipts.map((r) => [
     r.number, r.date, project.name, r.province, r.category, r.vendor, r.description, r.billable ? 'Billable' : 'Non-billable',
     plain(r.subtotal), plain(r.gst), plain(r.pst), plain(r.tip), plain(total(r)), r.est ? 'Yes' : '', r.notes,
-    hasImage(r) ? `receipts/${imageName(r)}` : '', r.billable ? r.billing_status : '', r.billable ? r.invoice_ref : '',
+    filesOf(r).map((_, n) => `receipts/${imageName(r, n + 1)}`).join('; '), r.billable ? r.billing_status : '', r.billable ? r.invoice_ref : '',
   ]);
   return '﻿' + [head, ...rows].map((r) => r.map(csvCell).join(',')).join('\r\n') + '\r\n'; // BOM: Excel reads UTF-8
 }
@@ -150,25 +151,27 @@ export function buildPdf(project, receipts, { from, to, invoice } = {}) {
     section('Billable', billable);
     section('Non-billable', nonBillable);
 
-    // ---- receipt images, one per page
+    // ---- receipt images, one per page (a receipt with several photos gets a page for each)
     for (const r of receipts) {
-      doc.addPage();
-      doc.font('Helvetica-Bold').fontSize(13).fillColor(INK)
-        .text(`#${String(r.number).padStart(3, '0')}  ${r.description || r.vendor || ''}`, left, MARGIN);
-      doc.font('Helvetica').fontSize(9).fillColor(MUTED).text(
-        [r.vendor, r.date, r.category, r.province, r.billable ? `Billable${r.billing_status && r.billing_status !== 'unbilled' ? ` (${r.billing_status}${r.invoice_ref ? ' ' + r.invoice_ref : ''})` : ''}` : 'Non-billable',
-          `Subtotal ${money(r.subtotal)}`, `GST/HST ${money(r.gst)}${r.est ? '*' : ''}`, `PST/QST ${money(r.pst)}${r.est ? '*' : ''}`,
-          `Tip ${money(r.tip)}`, `Total ${money(total(r))}`].filter(Boolean).join('   •   '));
-      if (r.notes) doc.text(`Notes: ${r.notes}`);
-      doc.moveDown(0.5);
-      const top = doc.y;
-      const box = { w: doc.page.width - MARGIN * 2, h: bottom() - top };
-      const file = imageFile(r.image);
-      if (file) {
-        try { doc.image(file, left, top, { fit: [box.w, box.h], align: 'center', valign: 'top' }); }
-        catch { doc.fillColor(MUTED).text('(image could not be embedded)'); }
-      } else {
-        doc.fillColor(MUTED).font('Helvetica-Oblique').text('(no image attached)');
+      const files = filesOf(r);
+      for (let n = 0; n < Math.max(1, files.length); n++) {
+        doc.addPage();
+        doc.font('Helvetica-Bold').fontSize(13).fillColor(INK)
+          .text(`#${String(r.number).padStart(3, '0')}  ${r.description || r.vendor || ''}${files.length > 1 ? `   (photo ${n + 1} of ${files.length})` : ''}`, left, MARGIN);
+        doc.font('Helvetica').fontSize(9).fillColor(MUTED).text(
+          [r.vendor, r.date, r.category, r.province, r.billable ? `Billable${r.billing_status && r.billing_status !== 'unbilled' ? ` (${r.billing_status}${r.invoice_ref ? ' ' + r.invoice_ref : ''})` : ''}` : 'Non-billable',
+            `Subtotal ${money(r.subtotal)}`, `GST/HST ${money(r.gst)}${r.est ? '*' : ''}`, `PST/QST ${money(r.pst)}${r.est ? '*' : ''}`,
+            `Tip ${money(r.tip)}`, `Total ${money(total(r))}`].filter(Boolean).join('   •   '));
+        if (r.notes && n === 0) doc.text(`Notes: ${r.notes}`);
+        doc.moveDown(0.5);
+        const top = doc.y;
+        const box = { w: doc.page.width - MARGIN * 2, h: bottom() - top };
+        if (files[n]) {
+          try { doc.image(imageFile(files[n]), left, top, { fit: [box.w, box.h], align: 'center', valign: 'top' }); }
+          catch { doc.fillColor(MUTED).text('(image could not be embedded)'); }
+        } else {
+          doc.fillColor(MUTED).font('Helvetica-Oblique').text('(no image attached)');
+        }
       }
     }
 
@@ -196,9 +199,6 @@ export async function streamZip(res, project, receipts, opts) {
   zip.pipe(res);
   zip.append(pdf, { name: `${base}/report.pdf` });
   zip.append(buildCsv(project, receipts), { name: `${base}/report.csv` });
-  for (const r of receipts) {
-    const file = imageFile(r.image);
-    if (file) zip.file(file, { name: `${base}/receipts/${imageName(r)}` });
-  }
+  for (const r of receipts) filesOf(r).forEach((f, n) => zip.file(imageFile(f), { name: `${base}/receipts/${imageName(r, n + 1)}` }));
   await zip.finalize();
 }

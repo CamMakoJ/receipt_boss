@@ -6,12 +6,33 @@ import fs from 'node:fs';
 import path from 'node:path';
 import AdmZip from 'adm-zip';
 
-const zipPath = process.argv[2];
+import os from 'node:os';
+import readline from 'node:readline';
+import { decryptFile, looksEncrypted } from '../server/crypto-backup.js';
+
+let zipPath = process.argv[2];
 if (!zipPath || !fs.existsSync(zipPath)) {
-  console.error('usage: node scripts/restore.js <backup.zip>');
+  console.error('usage: node scripts/restore.js <backup.zip | backup.zip.enc>\n       (encrypted backups: set RB_BACKUP_PASSPHRASE or type the passphrase when asked)');
   process.exit(1);
 }
 const dataDir = path.resolve(process.env.DATA_DIR || 'data');
+
+async function askPassphrase() {
+  if (process.env.RB_BACKUP_PASSPHRASE) return process.env.RB_BACKUP_PASSPHRASE;
+  if (!process.stdin.isTTY) { console.error('This backup is encrypted. Set RB_BACKUP_PASSPHRASE, or run this in a terminal.'); process.exit(1); }
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout, terminal: true });
+  let muted = false;
+  rl._writeToOutput = (t) => { if (!muted) rl.output.write(t); };       // do not echo the passphrase
+  return new Promise((resolve) => { rl.question('Backup passphrase: ', (a) => { rl.close(); console.log(); resolve(a); }); muted = true; });
+}
+
+let tempZip = null;
+if (looksEncrypted(zipPath)) {
+  tempZip = path.join(os.tmpdir(), `rb-restore-${process.pid}.zip`);
+  try { await decryptFile(zipPath, tempZip, await askPassphrase()); }
+  catch (e) { console.error(`Could not decrypt: ${e.message}`); process.exit(1); }
+  zipPath = tempZip;
+}
 const zip = new AdmZip(zipPath);
 const names = zip.getEntries().map((e) => e.entryName);
 if (!names.includes('receipts.db') || !names.includes('manifest.json')) {
@@ -39,3 +60,4 @@ for (const e of zip.getEntries()) {
 }
 console.log(`Restored database and ${images} image(s) into ${dataDir}`);
 console.log(`Previous data kept in ${aside}`);
+if (tempZip) fs.rmSync(tempZip, { force: true });

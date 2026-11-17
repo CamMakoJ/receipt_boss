@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import { parseReceiptText, resolveAmounts, lineAmount, findDate, detectProvince } from '../public/ocr-parse.js';
+import { parseReceiptText, resolveAmounts, lineAmount, findDate, detectProvince, fieldsFromScan } from '../public/ocr-parse.js';
 
 const TODAY = '2026-11-17';
 const BC = { gst: 5000, pst: 7000 }, ON = { gst: 13000, pst: 0 }, AB = { gst: 5000, pst: 0 };
@@ -119,4 +119,15 @@ test('a garbled amount (OCR read "5M98") is recovered from the total and flagged
   assert.deepEqual([r.subtotal, r.gst, r.pst], [8475, 424, 593]);
   assert.deepEqual(r.inferred, ['pst']);
   assert.equal(r.estimated, true);
+});
+
+test('fieldsFromScan: everything quick capture needs in one call', () => {
+  const provinces = { BC: BC, ON: ON, AB: AB };
+  const f = fieldsFromScan(HOME_DEPOT, provinces, 'ON', TODAY);
+  assert.deepEqual(f.data, { province: 'BC', vendor: 'Home Depot', date: '2026-03-14', category: 'Materials', subtotal: 8475, gst: 424, pst: 593, tax_auto: false });
+  assert.equal(f.total, 9492); assert.equal(f.estimated, false);
+
+  const bare = fieldsFromScan('Mystery Shop\nTOTAL 11.30', provinces, 'ON', TODAY);                // only a total: derived from the default province, flagged
+  assert.deepEqual([bare.data.province, bare.data.subtotal, bare.data.gst, bare.data.tax_auto, bare.estimated], ['ON', 1000, 130, true, true]);
+  assert.deepEqual(fieldsFromScan('', provinces, 'AB', TODAY).data, { province: 'AB' });             // nothing readable: just the default province
 });

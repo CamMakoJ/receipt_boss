@@ -218,3 +218,25 @@ test('smart search: a sentence becomes sanitised filters (and only for logged-in
   assert.equal((await c.post('/api/ai/search', { query: 'x', scope: 'items' })).status, 502);
   assert.equal((await client().post('/api/ai/search', { query: 'x' })).status, 401);
 });
+
+test('multi-photo receipts send every page; drafts are not checked until reviewed', async () => {
+  const c = await adminClient();
+  await setAi(c);
+  const p = (await c.post('/api/projects', { name: 'Pages' })).body;
+  llm.calls.length = 0; llm.handler = () => read();
+  const multi = (await c.post(`/api/projects/${p.id}/receipts`, { ...entry, description: 'Two pages', subtotal: 8475, images: [img(1), img(2)] })).body;
+  await checkIdle();
+  const parts = llm.calls[0].body.messages.at(-1).content;
+  assert.deepEqual(parts.map((x) => x.type), ['text', 'image_url', 'image_url']);
+  assert.match(parts[0].text, /2 photos/);
+  assert.equal((await c.get(`/api/receipts/${multi.id}`)).body.check.status, 'ok');
+
+  llm.calls.length = 0;
+  const draft = (await c.post(`/api/projects/${p.id}/receipts`, { ...entry, description: 'Draft', subtotal: 5555, draft: true, images: [img(1)] })).body;
+  await checkIdle();
+  assert.equal(llm.calls.length, 0); assert.equal(draft.check.status, 'none');           // nothing sent to the model for a draft
+  const fin = (await c.patch(`/api/receipts/${draft.id}`, { draft: false })).body;
+  assert.equal(fin.check.status, 'pending');                                                // reviewing it queues the check
+  await checkIdle();
+  assert.equal(llm.calls.length, 1);
+});

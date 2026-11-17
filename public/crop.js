@@ -86,6 +86,16 @@ export function extractQuad(src, quad) {
   return out;
 }
 
+/** No-UI crop for quick capture: decode, outline the paper automatically, flatten. Falls back to the whole frame. */
+export async function autoCropFile(file) {
+  const src = await fileToCanvas(file);
+  let quad = autoQuad(src);
+  if (!isReasonableQuad(quad)) quad = fullQuad(src.width, src.height);
+  let canvas;
+  try { canvas = extractQuad(src, quad); } catch { canvas = src; }
+  return { canvas, dataUrl: canvasToJpeg(canvas) };
+}
+
 export async function openCropper(file) {
   let src = await fileToCanvas(file);
   let quad = autoQuad(src);

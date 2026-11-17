@@ -82,6 +82,25 @@ if (version() < 3) {
   } catch (e) { db.exec('ROLLBACK'); throw e; }
 }
 
+if (version() < 4) {
+  db.exec('BEGIN');
+  try {
+    db.exec(`
+      -- several photos per receipt / item (AUTOINCREMENT: ids are never reused, so cached /photos/:id URLs can never show a different image). receipts.image and items.image stay as the "cover" (first photo) so older code paths keep working.
+      CREATE TABLE receipt_photos (id INTEGER PRIMARY KEY AUTOINCREMENT, receipt_id INTEGER NOT NULL REFERENCES receipts(id) ON DELETE CASCADE, file TEXT NOT NULL, position INTEGER NOT NULL DEFAULT 0);
+      CREATE INDEX idx_receipt_photos ON receipt_photos(receipt_id, position);
+      CREATE TABLE item_photos (id INTEGER PRIMARY KEY AUTOINCREMENT, item_id INTEGER NOT NULL REFERENCES items(id) ON DELETE CASCADE, file TEXT NOT NULL, position INTEGER NOT NULL DEFAULT 0);
+      CREATE INDEX idx_item_photos ON item_photos(item_id, position);
+      INSERT INTO receipt_photos (receipt_id, file, position) SELECT id, image, 0 FROM receipts WHERE image IS NOT NULL;
+      INSERT INTO item_photos (item_id, file, position) SELECT id, image, 0 FROM items WHERE image IS NOT NULL;
+      -- quick-capture drafts: kept out of totals, reports, duplicate checks and AI checks until reviewed (their number is -id until then)
+      ALTER TABLE receipts ADD COLUMN draft INTEGER NOT NULL DEFAULT 0;
+    `);
+    db.exec('PRAGMA user_version = 4');
+    db.exec('COMMIT');
+  } catch (e) { db.exec('ROLLBACK'); throw e; }
+}
+
 export function tx(fn) {
   db.exec('BEGIN IMMEDIATE');
   try { const r = fn(); db.exec('COMMIT'); return r; }

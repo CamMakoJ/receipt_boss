@@ -6,12 +6,14 @@ import https from 'node:https';
 import { fileURLToPath } from 'node:url';
 import { db, tx, DATA_DIR } from './db.js';
 import { sumReceipts, total, slug } from './util.js';
-import { err, wrap, str, cents, dateStr, decodeImage, saveImage, rmImage, imageFile } from './http.js';
+import { err, wrap, str, cents, dateStr, rmImage, imageFile } from './http.js';
+import { photosOf, photosMap, photoFiles, ownsPhoto, applyPhotoChanges } from './photos.js';
 import { PROVINCES, DEFAULT_PROVINCE, RECEIPT_CATEGORIES, ITEM_CATEGORIES, isProvince, calcTax } from './tax.js';
 import { registerAuth, sessionMiddleware } from './auth.js';
 import { registerItems } from './items.js';
 import { registerBackup, startBackupScheduler } from './backup.js';
 import { buildPdf, buildCsv, streamZip, applyAutoTax } from './export.js';
+import { buildVendorIndex } from '../public/vendor.js';
 import { registerAi, aiReady, aiConfig, enqueueCheck, resumePendingChecks, parseCheck } from './ai.js';
 
 const PUBLIC_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'public');
@@ -53,10 +55,13 @@ export function createApp() {
   const BILLING = ['unbilled', 'invoiced', 'paid'];
   const province = (v) => { if (!isProvince(v)) throw err(400, 'invalid province code'); return v; };
 
-  const publicReceipt = ({ ocr_text, check_json, check_status, ...r }) => ({
-    ...r, billable: !!r.billable, tax_auto: !!r.tax_auto, total: total(r), has_image: !!r.image, has_text: !!ocr_text, image: undefined,
+  const publicReceipt = ({ ocr_text, check_json, check_status, photos, ...r }) => ({
+    ...r, billable: !!r.billable, tax_auto: !!r.tax_auto, draft: !!r.draft, total: total(r), has_image: !!r.image, has_text: !!ocr_text, image: undefined,
+    photos: (photos || []).map((x) => x.id),                     // ids in order; the first is the cover
     check: parseCheck({ check_status, check_json }),
   });
+  const withPhotos = (rows) => { const m = photosMap('receipt', rows.map((r) => r.id)); return rows.map((r) => ({ ...r, photos: m[r.id] || [] })); };
+  const full = (row) => publicReceipt({ ...row, photos: photosOf('receipt', row.id) });
   const getProject = (id, user) => {
     const p = db.prepare('SELECT * FROM projects WHERE id = ? AND user_id = ?').get(id, user.id);
     if (!p) throw err(404, 'project not found');
@@ -68,7 +73,7 @@ export function createApp() {
     return r;
   };
   const projectReceipts = (id, from, to) => {
-    let sql = 'SELECT * FROM receipts WHERE project_id = ?';
+    let sql = 'SELECT * FROM receipts WHERE project_id = ? AND draft = 0';
     const args = [id];
     if (from) { sql += ' AND date >= ?'; args.push(from); }
     if (to) { sql += ' AND date <= ?'; args.push(to); }
@@ -101,7 +106,8 @@ export function createApp() {
 
   app.get('/api/projects/:id', (req, res) => {
     const p = getProject(req.params.id, req.user);
-    res.json({ ...projectSummary(p), receipts: projectReceipts(p.id).map(publicReceipt) });
+    const drafts = db.prepare('SELECT * FROM receipts WHERE project_id = ? AND draft = 1 ORDER BY id').all(p.id);
+    res.json({ ...projectSummary(p), receipts: withPhotos(projectReceipts(p.id)).map(publicReceipt), drafts: withPhotos(drafts).map(publicReceipt) });
   });
 
   app.patch('/api/projects/:id', (req, res) => {
@@ -118,9 +124,9 @@ export function createApp() {
 
   app.delete('/api/projects/:id', (req, res) => {
     const p = getProject(req.params.id, req.user);
-    const imgs = projectReceipts(p.id).map((r) => r.image);
+    const files = photoFiles('receipt', 'project_id = ?', p.id);   // collect before the rows cascade away
     db.prepare('DELETE FROM projects WHERE id = ?').run(p.id);
-    imgs.forEach(rmImage);
+    files.forEach(rmImage);
     res.status(204).end();
   });
 
@@ -145,6 +151,7 @@ export function createApp() {
       billing_status: pick('billing_status', (v) => { if (!BILLING.includes(v)) throw err(400, 'invalid billing status'); return v; }) ?? 'unbilled',
       invoice_ref: pick('invoice_ref', (v) => str(v, 60)) ?? '',
     };
+    if (b.ocr_append) f.ocr_text = `${f.ocr_text}\n\n${str(b.ocr_append, 8000)}`.trim().slice(0, 8000);   // another page was scanned: keep the earlier text too
     if (f.tax_auto) Object.assign(f, calcTax(f.subtotal, f.province)); // server is the authority on auto taxes
     if (!f.description) f.description = f.category;                      // description defaults to the category
     return f;
@@ -156,7 +163,7 @@ export function createApp() {
     if (!t || !label) return [];
     return db.prepare(`SELECT r.id, r.number, r.description, r.vendor, r.date, p.id AS project_id, p.name AS project_name, (r.subtotal + r.gst + r.pst + r.tip) AS total
       FROM receipts r JOIN projects p ON p.id = r.project_id
-      WHERE p.user_id = ? AND r.id != ? AND r.date = ? AND (r.subtotal + r.gst + r.pst + r.tip) = ?
+      WHERE p.user_id = ? AND r.draft = 0 AND r.id != ? AND r.date = ? AND (r.subtotal + r.gst + r.pst + r.tip) = ?
         AND lower(trim(CASE WHEN r.vendor != '' THEN r.vendor ELSE r.description END)) = ?`).all(user.id, excludeId, f.date, t, label);
   };
   const needsCheck = (image, text) => aiReady() && aiConfig().auto_check && !!(image || text);
@@ -167,34 +174,52 @@ export function createApp() {
     const clientId = b.client_id ? str(b.client_id, 80) : null;
     if (clientId) { // idempotent: a retried offline sync returns the existing receipt
       const dup = db.prepare(`SELECT r.* FROM receipts r JOIN projects pr ON pr.id = r.project_id WHERE r.client_id = ? AND pr.user_id = ?`).get(clientId, req.user.id);
-      if (dup) return res.status(200).json(publicReceipt(dup));
+      if (dup) return res.status(200).json(full(dup));
     }
+    const isDraft = !!b.draft;                                   // quick-capture: stays out of totals/reports until reviewed
     const f = receiptFields(b, null, p);
-    if (!b.allow_duplicate) {
+    if (!b.allow_duplicate && !isDraft) {
       const duplicates = findDuplicates(req.user, f);
       if (duplicates.length) throw err(409, 'This looks like a receipt you already entered', { duplicates });
     }
-    const image = b.image ? saveImage(decodeImage(b.image)) : null;
-    try {
-      const row = tx(() => {
-        const cur = db.prepare('SELECT next_number FROM projects WHERE id = ?').get(p.id);
+    const row = tx(() => {
+      let number;
+      if (isDraft) number = -db.prepare('SELECT COALESCE(MAX(id), 0) + 1 AS n FROM receipts').get().n; // unique placeholder (-id); real number on review
+      else {
+        number = db.prepare('SELECT next_number FROM projects WHERE id = ?').get(p.id).next_number;
         db.prepare('UPDATE projects SET next_number = next_number + 1 WHERE id = ?').run(p.id);
-        const r = db.prepare(`INSERT INTO receipts
-          (project_id, client_id, number, date, vendor, category, description, province, subtotal, gst, pst, tip, billable, tax_auto, notes, image, ocr_text)
-          VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(p.id, clientId, cur.next_number, f.date, f.vendor, f.category, f.description,
-          f.province, f.subtotal, f.gst, f.pst, f.tip, f.billable, f.tax_auto, f.notes, image, f.ocr_text);
-        return db.prepare('SELECT * FROM receipts WHERE id = ?').get(r.lastInsertRowid);
-      });
-      if (needsCheck(row.image, row.ocr_text)) enqueueCheck(row.id); // second opinion runs in the background
-      res.status(201).json(publicReceipt(db.prepare('SELECT * FROM receipts WHERE id = ?').get(row.id)));
-    } catch (e) { rmImage(image); throw e; }
+      }
+      const r = db.prepare(`INSERT INTO receipts
+        (project_id, client_id, number, date, vendor, category, description, province, subtotal, gst, pst, tip, billable, tax_auto, notes, ocr_text, draft)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(p.id, clientId, number, f.date, f.vendor, f.category, f.description,
+        f.province, f.subtotal, f.gst, f.pst, f.tip, f.billable, f.tax_auto, f.notes, f.ocr_text, isDraft ? 1 : 0);
+      applyPhotoChanges('receipt', r.lastInsertRowid, b, { create: true });   // throws on a bad image -> whole insert rolls back
+      return db.prepare('SELECT * FROM receipts WHERE id = ?').get(r.lastInsertRowid);
+    });
+    if (!isDraft && needsCheck(row.image, row.ocr_text)) enqueueCheck(row.id); // second opinion runs in the background
+    res.status(201).json(full(db.prepare('SELECT * FROM receipts WHERE id = ?').get(row.id)));
   });
 
   // every receipt of this user, for the cross-project search page (OCR text trimmed to keep the payload small)
   app.get('/api/receipts', (req, res) => {
-    res.json(db.prepare(`SELECT r.*, p.name AS project_name FROM receipts r JOIN projects p ON p.id = r.project_id
-      WHERE p.user_id = ? ORDER BY r.date DESC, r.id DESC`).all(req.user.id)
-      .map((r) => ({ ...publicReceipt(r), ocr_text: r.ocr_text.slice(0, 1500) })));
+    const rows = db.prepare(`SELECT r.*, p.name AS project_name FROM receipts r JOIN projects p ON p.id = r.project_id
+      WHERE p.user_id = ? AND r.draft = 0 ORDER BY r.date DESC, r.id DESC`).all(req.user.id);
+    res.json(withPhotos(rows).map((r) => ({ ...publicReceipt(r), ocr_text: r.ocr_text.slice(0, 1500) })));
+  });
+
+  // vendor memory: which category / billable setting each store usually gets (receipts: yours; items: the household's)
+  app.get('/api/vendors', (req, res) => {
+    const rows = req.query.scope === 'items'
+      ? db.prepare("SELECT vendor, category, purchase_date AS date FROM items WHERE vendor != ''").all()
+      : db.prepare(`SELECT r.vendor, r.category, r.billable, r.date FROM receipts r JOIN projects p ON p.id = r.project_id
+          WHERE p.user_id = ? AND r.draft = 0 AND r.vendor != ''`).all(req.user.id);
+    res.json(buildVendorIndex(rows).slice(0, 500));
+  });
+
+  // quick-capture drafts waiting for review, oldest first
+  app.get('/api/inbox', (req, res) => {
+    res.json(withPhotos(db.prepare(`SELECT r.*, p.name AS project_name FROM receipts r JOIN projects p ON p.id = r.project_id
+      WHERE p.user_id = ? AND r.draft = 1 ORDER BY r.id`).all(req.user.id)).map((r) => ({ ...publicReceipt(r), ocr_text: undefined })));
   });
 
   // bulk invoiced / paid tracking for billable receipts
@@ -207,7 +232,7 @@ export function createApp() {
     const updated = tx(() => {
       let n = 0;
       for (const id of ids) {
-        const r = db.prepare('SELECT * FROM receipts WHERE id = ? AND project_id = ? AND billable = 1').get(Number(id), p.id);
+        const r = db.prepare('SELECT * FROM receipts WHERE id = ? AND project_id = ? AND billable = 1 AND draft = 0').get(Number(id), p.id);
         if (!r) continue;
         if (status === 'unbilled') db.prepare("UPDATE receipts SET billing_status = 'unbilled', invoice_ref = '', invoiced_at = NULL WHERE id = ?").run(r.id);
         else db.prepare('UPDATE receipts SET billing_status = ?, invoice_ref = ?, invoiced_at = ? WHERE id = ?').run(status, ref || r.invoice_ref, r.invoiced_at || today, r.id);
@@ -218,48 +243,61 @@ export function createApp() {
     res.json({ updated });
   });
 
-  app.get('/api/receipts/:id', (req, res) => res.json(publicReceipt(getReceipt(req.params.id, req.user))));
+  app.get('/api/receipts/:id', (req, res) => res.json(full(getReceipt(req.params.id, req.user))));
 
   app.patch('/api/receipts/:id', (req, res) => {
     const r = getReceipt(req.params.id, req.user);
     const b = req.body || {};
     const f = receiptFields(b, r, getProject(r.project_id, req.user));
-    let image = r.image;
-    if (b.image) image = saveImage(decodeImage(b.image));
-    else if (b.remove_image) image = null;
-    let projectId = r.project_id, number = r.number;
-    if (b.project_id !== undefined && Number(b.project_id) !== r.project_id) { // move to another of your projects
-      const target = getProject(b.project_id, req.user);
-      projectId = target.id;
-      number = target.next_number;
-      db.prepare('UPDATE projects SET next_number = next_number + 1 WHERE id = ?').run(target.id);
+    const finalizing = !!r.draft && b.draft === false;           // reviewed a quick-capture draft: it becomes a real receipt now
+    if (finalizing && !b.allow_duplicate) {
+      const duplicates = findDuplicates(req.user, f, r.id);
+      if (duplicates.length) throw err(409, 'This looks like a receipt you already entered', { duplicates });
+    }
+    const target = b.project_id !== undefined && Number(b.project_id) !== r.project_id ? getProject(b.project_id, req.user) : null; // another of your projects
+    const projectId = target ? target.id : r.project_id;
+    let number = r.number;
+    if (finalizing || (target && !r.draft)) {                    // real receipts are numbered per project
+      const proj = target || getProject(r.project_id, req.user);
+      number = proj.next_number;
+      db.prepare('UPDATE projects SET next_number = next_number + 1 WHERE id = ?').run(proj.id);
     }
     const invoicedAt = f.billing_status === 'unbilled' ? null : (r.invoiced_at || new Date().toISOString().slice(0, 10));
+    const photosChanged = applyPhotoChanges('receipt', r.id, b);
     db.prepare(`UPDATE receipts SET project_id=?, number=?, date=?, vendor=?, category=?, description=?, province=?, subtotal=?, gst=?, pst=?,
-      tip=?, billable=?, tax_auto=?, notes=?, image=?, ocr_text=?, billing_status=?, invoice_ref=?, invoiced_at=? WHERE id=?`).run(projectId, number, f.date, f.vendor, f.category, f.description,
-      f.province, f.subtotal, f.gst, f.pst, f.tip, f.billable, f.tax_auto, f.notes, image, f.ocr_text, f.billing_status,
-      f.billing_status === 'unbilled' ? '' : f.invoice_ref, invoicedAt, r.id);
-    if (image !== r.image) rmImage(r.image);
-    // an earlier check no longer describes this entry once the checked fields (or the photo/text) change
+      tip=?, billable=?, tax_auto=?, notes=?, ocr_text=?, billing_status=?, invoice_ref=?, invoiced_at=?, draft=? WHERE id=?`).run(projectId, number, f.date, f.vendor, f.category, f.description,
+      f.province, f.subtotal, f.gst, f.pst, f.tip, f.billable, f.tax_auto, f.notes, f.ocr_text, f.billing_status,
+      f.billing_status === 'unbilled' ? '' : f.invoice_ref, invoicedAt, finalizing ? 0 : r.draft, r.id);
+    // an earlier check no longer describes this entry once the checked fields (or the photos/text) change
     const changed = f.date !== r.date || f.vendor !== r.vendor || f.subtotal !== r.subtotal || f.gst !== r.gst || f.pst !== r.pst || f.tip !== r.tip
-      || image !== r.image || f.ocr_text !== r.ocr_text;
-    if (changed) { if (needsCheck(image, f.ocr_text)) enqueueCheck(r.id); else db.prepare("UPDATE receipts SET check_status = 'none', check_json = '' WHERE id = ?").run(r.id); }
-    res.json(publicReceipt(getReceipt(r.id, req.user)));
+      || photosChanged || f.ocr_text !== r.ocr_text;
+    if (finalizing || changed) {
+      const now = db.prepare('SELECT image, ocr_text, draft FROM receipts WHERE id = ?').get(r.id);
+      if (!now.draft && needsCheck(now.image, now.ocr_text)) enqueueCheck(r.id);
+      else db.prepare("UPDATE receipts SET check_status = 'none', check_json = '' WHERE id = ?").run(r.id);
+    }
+    res.json(full(getReceipt(r.id, req.user)));
   });
 
   app.delete('/api/receipts/:id', (req, res) => {
     const r = getReceipt(req.params.id, req.user);
+    const files = photosOf('receipt', r.id).map((x) => x.file);
     db.prepare('DELETE FROM receipts WHERE id = ?').run(r.id);
-    rmImage(r.image);
+    files.forEach(rmImage);
     res.status(204).end();
   });
 
-  app.get('/api/receipts/:id/image', (req, res) => {
+  const sendPhoto = (res, file, immutable = true) => {
+    const f = imageFile(file);
+    if (!f) throw err(404, 'no image');
+    // /photos/:id never changes (ids are never reused); the "cover" URL does, so it must always revalidate
+    res.setHeader('Cache-Control', immutable ? 'private, max-age=31536000, immutable' : 'private, no-cache');
+    res.type('image/jpeg').sendFile(path.resolve(f));
+  };
+  app.get('/api/receipts/:id/image', (req, res) => sendPhoto(res, getReceipt(req.params.id, req.user).image, false));   // the cover
+  app.get('/api/receipts/:id/photos/:pid', (req, res) => {
     const r = getReceipt(req.params.id, req.user);
-    const file = imageFile(r.image);
-    if (!file) throw err(404, 'no image');
-    res.setHeader('Cache-Control', 'private, max-age=31536000, immutable');
-    res.type('image/jpeg').sendFile(path.resolve(file));
+    sendPhoto(res, ownsPhoto('receipt', r.id, Number(req.params.pid)));
   });
 
   // ---------- exports (?autotax=0 turns off report-time GST/PST estimation)
@@ -271,6 +309,8 @@ export function createApp() {
     // ?only=billable drops non-billable receipts; ?billing=unbilled|invoiced|paid and ?invoice=REF narrow the billable ones
     const only = req.query.only === 'billable', billing = BILLING.includes(req.query.billing) ? req.query.billing : 'all', invoice = str(req.query.invoice, 60);
     receipts = receipts.filter((r) => (r.billable ? (billing === 'all' || r.billing_status === billing) && (!invoice || r.invoice_ref === invoice) : !only));
+    const fm = photosMap('receipt', receipts.map((r) => r.id));
+    receipts = receipts.map((r) => ({ ...r, files: (fm[r.id] || []).map((x) => x.file) }));
     if (req.query.autotax !== '0') receipts = applyAutoTax(receipts);
     return { p, from, to, invoice, receipts };
   };

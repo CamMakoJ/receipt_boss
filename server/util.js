@@ -31,9 +31,9 @@ export function slug(s, max = 50) {
 }
 
 /** "001_Lumber-for-deck.jpg" — receipt number + description (falls back to vendor). */
-export function imageName(r) {
+export function imageName(r, n = 1) {
   const label = slug(r.description) || slug(r.vendor) || 'receipt';
-  return `${String(r.number).padStart(3, '0')}_${label}.jpg`;
+  return `${String(r.number).padStart(3, '0')}_${label}${n > 1 ? `_${n}` : ''}.jpg`;   // extra pages: 001_label_2.jpg, 001_label_3.jpg
 }
 
 export function csvCell(v) {

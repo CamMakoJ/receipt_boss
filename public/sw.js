@@ -1,7 +1,7 @@
 // Offline support: app shell is cached; API reads fall back to the last good response.
-const VERSION = 'v5';
+const VERSION = 'v7';
 const SHELL = `shell-${VERSION}`, DATA = `data-${VERSION}`, VENDOR = 'vendor-v1'; // OCR engine (~15 MB) survives app updates
-const SHELL_FILES = ['/', '/app.js', '/crop.js', '/warp.js', '/filters.js', '/ocr.js', '/ocr-parse.js', '/style.css', '/manifest.webmanifest', '/icon.svg'];
+const SHELL_FILES = ['/', '/app.js', '/crop.js', '/warp.js', '/filters.js', '/vendor.js', '/ocr.js', '/ocr-parse.js', '/style.css', '/manifest.webmanifest', '/icon.svg'];
 
 self.addEventListener('install', (e) => {
   e.waitUntil(caches.open(SHELL).then((c) => c.addAll(SHELL_FILES)).then(() => self.skipWaiting()));
@@ -19,8 +19,8 @@ self.addEventListener('fetch', (e) => {
   if (/\/(export\.zip|report\.pdf|report\.csv|items\.csv)$/.test(url.pathname) || url.pathname.startsWith('/api/backup') || url.pathname.startsWith('/api/users') || url.pathname === '/api/ai') return;
 
   if (url.pathname.startsWith('/api/')) {
-    const isImage = url.pathname.endsWith('/image');
-    e.respondWith(isImage ? cacheFirst(req, DATA) : networkFirst(req, DATA));
+    const isPhoto = /\/photos\/\d+$/.test(url.pathname);            // ids are never reused, so these can be cached forever
+    e.respondWith(isPhoto ? cacheFirst(req, DATA) : networkFirst(req, DATA));
     return;
   }
   e.respondWith(url.pathname.startsWith('/vendor/') ? cacheFirst(req, VENDOR) : networkFirst(req, SHELL, '/'));

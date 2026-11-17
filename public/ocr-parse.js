@@ -152,3 +152,21 @@ export function resolveAmounts(p, rates) {
   }
   return { subtotal, gst, pst, tip, estimated: inferred.size > 0, inferred: [...inferred] };
 }
+
+/**
+ * OCR text -> receipt fields for saving without a form (quick capture). Only fields that were actually found are set.
+ * `provinces` is the /api/meta table ({ BC: { gst, pst, ... } }). Returns { data, estimated, inferred, total }.
+ */
+export function fieldsFromScan(text, provinces, defaultProvince, today) {
+  const p = parseReceiptText(text, { today });
+  const province = p.province && provinces[p.province] ? p.province : defaultProvince;
+  const a = resolveAmounts(p, provinces[province]);
+  const readTax = p.gst !== null || p.pst !== null || p.tax !== null;
+  const data = { province };
+  if (p.vendor) data.vendor = p.vendor;
+  if (p.date) data.date = p.date;
+  if (p.category) data.category = p.category;
+  if (a.subtotal !== null) { data.subtotal = a.subtotal; data.gst = a.gst ?? 0; data.pst = a.pst ?? 0; data.tax_auto = !readTax; }   // taxes printed on the receipt are kept exactly
+  if (a.tip !== null) data.tip = a.tip;
+  return { data, estimated: a.estimated, inferred: a.inferred, total: p.total };
+}

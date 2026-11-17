@@ -169,9 +169,10 @@ export function registerAuth(app) {
     if (!u) throw err(404, 'user not found');
     if (u.id === req.user.id) throw err(400, 'you cannot delete your own account');
     if (u.role === 'admin' && adminCount() <= 1) throw err(400, 'there must be at least one admin');
-    const images = db.prepare('SELECT r.image FROM receipts r JOIN projects p ON p.id = r.project_id WHERE p.user_id = ?').all(u.id);
-    db.prepare('DELETE FROM users WHERE id = ?').run(u.id); // cascades to projects, receipts, sessions
-    images.forEach((i) => rmImage(i.image));
+    const files = db.prepare(`SELECT rp.file FROM receipt_photos rp JOIN receipts r ON r.id = rp.receipt_id
+      JOIN projects p ON p.id = r.project_id WHERE p.user_id = ?`).all(u.id).map((x) => x.file);
+    db.prepare('DELETE FROM users WHERE id = ?').run(u.id); // cascades to projects, receipts, photo rows, sessions
+    files.forEach(rmImage);
     res.status(204).end();
   });
 }

@@ -6,10 +6,13 @@ Self-hosted receipt tracker. Runs on a machine on your LAN, used from phones/com
 
 - **Accounts.** First visit creates the admin; the admin adds family members. Each user's projects and receipts are private to them.
 - **Projects → receipts**, grouped Billable / Non-billable with running totals.
-- **Per receipt:** date, vendor, **province**, **category**, description, subtotal, **GST/HST**, **PST/QST**, tip (kept separate), photo.
+- **Per receipt:** date, vendor, **province**, **category**, description, subtotal, **GST/HST**, **PST/QST**, tip (kept separate), and **up to 12 photos**.
   - **Auto-calculated taxes** from subtotal + the receipt's province (all 13 provinces/territories; HST provinces put the HST in the GST/HST box). Tips are never taxed. Type your own tax amount any time and auto-calc switches off for that receipt.
   - **Category → description:** pick a category (or type your own) and the description fills in with it; edit the description and it stays yours. Blank descriptions default to the category.
 - **Photo → crop → read.** Taking or choosing a photo opens a full-screen **crop screen**: the receipt is auto-outlined with four free corners (drag any corner onto the paper's corner — a magnifier shows the exact spot under your finger — or drag an edge/the whole outline; rotate, Reset, Auto). **Done** flattens the outline into an upright rectangle (**perspective correction**, so photos shot at an angle come out straight), then reads the receipt text and **pre-fills** vendor, date, province (from the postal code), category (from the vendor), subtotal, GST/HST, PST/QST and tip. Filled fields are highlighted yellow for you to check; if a figure couldn't be read clearly but the total pins it down, it is filled from the total and called out by name. Reading runs **on your device** (Tesseract in WebAssembly, served by this app) — no image or text is sent anywhere, and it works offline. Household items get date, vendor and price. Switch auto-reading off with the checkbox under the photo buttons; **🔍 Read text** re-runs it on the current photo.
+- **Several photos per receipt or item.** Add as many as you need — a long receipt in two halves, or for a household item the receipt *plus* the warranty card *plus* the serial-number sticker. Each photo goes through the crop screen and is read; the first is the **cover** (shown in lists — tap ★ on another to make it the cover), ✕ removes one, tap a thumbnail to view it full screen. Reports get a page per photo (`001_description.jpg`, `001_description_2.jpg`…), the AI check looks at all of them together, and the text of every page is searchable.
+- **Quick capture & Inbox.** For a stack of receipts (a day in the field), open **⚡ Quick capture** from the Projects page: choose the project once, then just tap **Capture** for each receipt — no forms. Each photo is auto-cropped (with perspective correction), read in the background, matched to your usual category/billable setting for that store, and saved to your **Inbox** as a *draft*. Drafts are **not** counted in totals, reports, search or duplicate checks until you review them: **Inbox → Review them one by one** opens each with the details pre-filled, **File receipt** files it and jumps to the next. It works offline too — captures are stored on the device the moment you take them and sync when the connection returns.
+- **Vendor memory.** Once you've filed a store at least twice with a clear habit (≥60% the same category, ≥70% the same billable/non-billable choice), typing or scanning it pre-fills that — e.g. *Home Depot → Materials, billable* — and says so. Store names are matched without store numbers, case or "Inc/Canada" (*HOME DEPOT #7011* = *Home Depot*). A store-name autocomplete uses your history too, which keeps spelling consistent. It never changes an already-filed receipt, and it never overrides something you chose by hand.
 - **Report export** per project (optional date range): PDF (summary, billable and non-billable tables with province & category, then one page per receipt image) + CSV + `receipts/001_description.jpg` — all in one zip, or PDF/CSV separately.
   - *Auto-calculate missing GST/PST* option (on by default): receipts saved with **no** tax get an estimate from their own province, marked `*` in the PDF and "Tax estimated = Yes" in the CSV. Nothing is changed in the database.
 - **Invoiced / paid tracking.** Billable receipts are *unbilled → invoiced → paid*. Tap **Select** on the Billable list to mark several at once, or use **Create invoice bundle…**: it marks the unbilled billable receipts in the date range as invoiced under your invoice number and downloads a bundle of just those (PDF titled with the invoice number), so nothing is billed twice. The project summary shows unbilled / invoiced / paid totals; exports can be filtered by status or invoice number, and the CSV has *Billing status* and *Invoice* columns.
@@ -17,7 +20,7 @@ Self-hosted receipt tracker. Runs on a machine on your LAN, used from phones/com
 - **Search & filters.** The Household page (and *Search all receipts* on the Projects page) has a search box plus filters — category, warranty status, store, date range, price range, sort — with removable chips. Search covers names, stores, serial numbers, notes **and the text read from the photo**. It runs on the device, so it is instant and works offline.
 - **Local AI (optional).** Connect any OpenAI-compatible server on your network (see *Local AI* below) for a second-opinion check of work receipts and for **✨ Ask** search.
 - **Household items & warranties** (TV, fridge, laptop…): item, purchase date, price, vendor, serial, receipt photo, and warranty length (months/years, or unknown). Shows warranty end date and groups into *ending soon (90 days) / under warranty / unknown / expired*. Shared by everyone on the server. CSV export.
-- **Backups** of everything (database, accounts, all images) to a local folder, another folder, and/or **Google Drive**; scheduled or on demand.
+- **Backups** of everything (database, accounts, all images) to a local folder, another folder, and/or **Google Drive**; scheduled or on demand; optionally **encrypted with a passphrase** (AES-256).
 - **Offline**: installable PWA. Receipts and household items added with no connection are saved on the device and sync automatically.
 
 ## Run
@@ -88,19 +91,33 @@ The app never holds Google credentials. It uses [rclone](https://rclone.org), wh
 3. Check: `rclone lsd gdrive:`
 4. In **Settings → Backup**: set *Google Drive remote* to `gdrive:ReceiptBoss`, tick *Back up automatically*, pick the interval and number of copies, **Save**, then **Back up now**.
 
-Each backup is `receipt-boss-backup-YYYYMMDD-HHMMSS.zip`. Retention ("copies to keep") is applied locally, in the extra folder, and on Drive — only to files with that exact name pattern. Login sessions are never included. The status line in Settings shows the last result, including upload errors. **Download backup** gives you a fresh zip on the spot. You can also set a *folder on the server* (a NAS, or a Google-Drive-for-desktop folder) instead of / in addition to rclone.
+Each backup is `receipt-boss-backup-YYYYMMDD-HHMMSS.zip` (`.zip.enc` when encrypted — see below). Retention ("copies to keep") is applied locally, in the extra folder, and on Drive — only to files with that exact name pattern. Login sessions are never included. The status line in Settings shows the last result, including upload errors. **Download backup** gives you a fresh zip on the spot. You can also set a *folder on the server* (a NAS, or a Google-Drive-for-desktop folder) instead of / in addition to rclone.
+
+### Encrypting backups
+
+Receipts hold personal and financial details, so you may not want readable copies sitting in Google Drive. In **Settings → Backup** tick **Encrypt backups with a passphrase** and enter one (10+ characters). From then on every backup — the local copy, the extra folder, the Drive upload and **Download backup** — is **AES-256-GCM** encrypted (key derived from your passphrase with scrypt; a wrong passphrase, a damaged file or tampering is always detected). Nothing readable leaves the server.
+
+- **Do not lose the passphrase.** There is no recovery: without it, encrypted backups cannot be opened. Keep it in your password manager.
+- **Verify now, not during a disaster.** Once an encrypted backup exists, **Verify I can decrypt** (under the backup settings) checks your passphrase against the newest one.
+- **Where the passphrase lives.** It is stored on the server so scheduled backups can run unattended, and it is **never included in a backup** or shown in the UI. That protects backups *at rest elsewhere* (Drive, a NAS, a lost USB stick); it does not protect against someone who already controls the server itself.
+- Prefer not to keep the key on the server at all? Leave this off and use rclone's own `crypt` remote for the Drive copy instead (`rclone config` → *crypt*).
 
 **Restore** (stop the server first):
 ```bash
 DATA_DIR=/var/lib/receipt-boss node scripts/restore.js receipt-boss-backup-20261117-020000.zip
+# encrypted: it asks for the passphrase (or set RB_BACKUP_PASSPHRASE for a non-interactive run)
+DATA_DIR=/var/lib/receipt-boss node scripts/restore.js receipt-boss-backup-20261117-020000.zip.enc
 ```
 Current data is moved to `pre-restore-<timestamp>/` inside `DATA_DIR`, not deleted.
 
 ## Offline behaviour
 
-Open the app once while online. Then, offline you can browse what you've already viewed and **add receipts and household items** (queued, shown as "Waiting to sync"). You can't edit/delete existing records, create projects, change settings or export until you're back online. Queued items are tied to the signed-in user. Syncing is idempotent (no duplicates on retry). Receipt numbers are assigned by the server when a receipt syncs.
+Open the app once while online. Then, offline you can browse what you've already viewed and **add receipts and household items** (queued, shown as "Waiting to sync"). You can't edit/delete existing records, create projects, change settings or export until you're back online. Queued items are tied to the signed-in user. Syncing is idempotent (no duplicates on retry). Receipt numbers are assigned by the server when a receipt syncs. **Quick capture works offline** (the reading happens on the device); captures wait on the device and arrive in the Inbox when the connection returns.
 
 ## Notes & limits
+
+- **Drafts and numbering.** A quick-capture draft has no receipt number (it shows as a draft) and takes the next number for its project only when you file it, so deleting drafts never leaves gaps. Quick capture does not keep the uncropped original — if the automatic crop looks wrong in the list, delete that draft and re-shoot with *Let me adjust the crop* ticked.
+- **Photos:** up to 12 per receipt/item. The AI check sends up to the first 4 photos of a receipt.
 
 - **Duplicate matching** is exact: same day, same vendor text (case-insensitive) and same total to the cent. Near-misses are not flagged.
 

@@ -6,6 +6,7 @@
 import fs from 'node:fs';
 import { db, getSetting, setSetting } from './db.js';
 import { err, wrap, str, imageFile } from './http.js';
+import { photosOf } from './photos.js';
 import { requireAdmin } from './auth.js';
 import { calcTax, PROVINCES, ITEM_CATEGORIES, RECEIPT_CATEGORIES } from './tax.js';
 import { total } from './util.js';
@@ -75,18 +76,21 @@ export function normalizeRead(o) {
 }
 
 async function readReceipt(r) {
-  const cfg = aiConfig(), file = imageFile(r.image);
+  const cfg = aiConfig();
+  const files = photosOf('receipt', r.id).map((p) => imageFile(p.file)).filter(Boolean).slice(0, 4);   // all pages of a multi-photo receipt
   let mode, content;
-  if (cfg.vision && file) {
+  if (cfg.vision && files.length) {
     mode = 'image';
-    const bytes = fs.readFileSync(file);
-    const mime = bytes[0] === 0x89 ? 'image/png' : 'image/jpeg';
-    content = [{ type: 'text', text: READ_PROMPT }, { type: 'image_url', image_url: { url: `data:${mime};base64,${bytes.toString('base64')}` } }];
+    const parts = files.map((f) => {
+      const bytes = fs.readFileSync(f), mime = bytes[0] === 0x89 ? 'image/png' : 'image/jpeg';
+      return { type: 'image_url', image_url: { url: `data:${mime};base64,${bytes.toString('base64')}` } };
+    });
+    content = [{ type: 'text', text: READ_PROMPT + (files.length > 1 ? `\nThe receipt is shown as ${files.length} photos, in order; read them together as one receipt.` : '') }, ...parts];
   } else if (r.ocr_text) {
     mode = 'text';
     content = `${READ_PROMPT}\n\nReceipt text (read by OCR, so it may contain mistakes):\n"""\n${r.ocr_text.slice(0, 6000)}\n"""`;
   } else {
-    throw new Error(file
+    throw new Error(files.length
       ? 'No receipt text to check. Turn on “model can read images” in the AI settings, or keep automatic receipt reading on when adding photos.'
       : 'This receipt has no photo or text to check.');
   }
