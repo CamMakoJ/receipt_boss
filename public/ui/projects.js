@@ -10,11 +10,15 @@ export async function viewProjects() {
   const [projects, inbox, health] = await Promise.all([
     api('GET', '/projects'), refreshInbox(), state.me.role === 'admin' ? api('GET', '/backup/health').catch(() => null) : null,
   ]);
-  const active = projects.filter((p) => !p.archived), archived = projects.filter((p) => p.archived);
+  const isInvoiced = (p) => !p.archived && p.billing.unbilled.count === 0 && (p.billing.invoiced.count + p.billing.paid.count) > 0;
+  const active = projects.filter((p) => !p.archived && !isInvoiced(p));
+  const invoiced = projects.filter(isInvoiced);
+  const archived = projects.filter((p) => p.archived);
+  const showInvoiced = localStorage.getItem('show-invoiced-projects') === '1';
   const row = (p) => `<a class="item" href="#/p/${p.id}"><div class="iconsq">${icon('folder')}</div>
     <div class="body"><div class="name">${esc(p.name)}</div>
       <div class="meta">${esc(p.client)}${p.client ? ' · ' : ''}${plural(p.all.count, 'receipt')} · ${esc(p.province)}</div>
-      <div class="tags">${p.billing.unbilled.total ? `<span class="pill warn">Unbilled ${money(p.billing.unbilled.total)}</span>` : ''}${p.non_billable.total ? `<span class="pill">Non-billable ${money(p.non_billable.total)}</span>` : ''}</div></div>
+      <div class="tags">${p.billing.unbilled.total ? `<span class="pill warn">Unbilled ${money(p.billing.unbilled.total)}</span>` : ''}${p.billing.invoiced.total ? `<span class="pill accent">Invoiced ${money(p.billing.invoiced.total)}</span>` : ''}${p.billing.paid.total ? `<span class="pill ok">Paid ${money(p.billing.paid.total)}</span>` : ''}${p.non_billable.total ? `<span class="pill">Non-billable ${money(p.non_billable.total)}</span>` : ''}</div></div>
     <div class="end money">${money(p.all.total)}</div></a>`;
   const backupBanner = health && ['warning', 'error'].includes(health.state)
     ? `<a class="banner ${health.state === 'error' ? 'bad' : ''}" href="#/settings/backup">${icon('alert')}<span class="grow">${esc(health.message)}</span><span class="small">Fix →</span></a>` : '';
@@ -24,9 +28,16 @@ export async function viewProjects() {
     ${backupBanner}
     ${inbox ? `<a class="banner info" href="#/inbox">${icon('inbox')}<span class="grow">${plural(inbox, 'capture')} waiting in your Inbox</span><span class="small">Review →</span></a>` : ''}
     <div class="row nowrap"><a class="btn big primary grow" href="#/capture">${icon('zap')} Quick capture</a><a class="btn big grow" href="#/search">${icon('search')} Search</a></div>
-    ${active.length ? `<div class="card list">${active.map(row).join('')}</div>` : `<div class="card pad">${emptyState('folder', 'No projects yet', 'Create one to start adding receipts.')}</div>`}
+    ${active.length ? `<div class="card list">${active.map(row).join('')}</div>` : `<div class="card pad">${emptyState('folder', invoiced.length ? 'No active projects' : 'No projects yet', invoiced.length ? 'All active projects have been invoiced.' : 'Create one to start adding receipts.')}</div>`}
+    ${invoiced.length ? `<div class="section-title"><h2>Invoiced (${invoiced.length})</h2><label class="check"><input type="checkbox" id="show-inv" ${showInvoiced ? 'checked' : ''}><span>Show invoiced</span></label></div><div id="inv-list" class="card list" ${showInvoiced ? '' : 'hidden'}>${invoiced.map(row).join('')}</div>` : ''}
     ${archived.length ? `<div class="section-title"><h2>Archived</h2></div><div class="card list">${archived.map(row).join('')}</div>` : ''}
   </div>`);
+
+  if ($('#show-inv')) $('#show-inv').onchange = (ev) => {
+    const on = ev.target.checked;
+    localStorage.setItem('show-invoiced-projects', on ? '1' : '0');
+    $('#inv-list').hidden = !on;
+  };
 
   $('#newbtn').onclick = guard(async () => {
     const fd = await formDialog({
