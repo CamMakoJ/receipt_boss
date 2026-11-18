@@ -10,10 +10,11 @@ import { photosOf } from './photos.js';
 import { requireAdmin } from './auth.js';
 import { calcTax, PROVINCES, ITEM_CATEGORIES, RECEIPT_CATEGORIES } from './tax.js';
 import { total } from './util.js';
+import { todayStr } from './tz.js';
 
 export const aiConfig = () => ({
   enabled: getSetting('ai.enabled', '0') === '1',
-  base_url: getSetting('ai.base_url', 'http://localhost:11434/v1'),
+  base_url: getSetting('ai.base_url', process.env.AI_BASE_URL || 'http://localhost:11434/v1'),
   model: getSetting('ai.model', ''),
   api_key: getSetting('ai.api_key', ''),            // never sent to the browser
   vision: getSetting('ai.vision', '0') === '1',      // can the model look at the photo itself?
@@ -133,7 +134,7 @@ export function compareReceipt(r, read) {
 }
 
 /** Cheap sanity checks that need no AI. */
-export function rulesCheck(r, today = new Date().toISOString().slice(0, 10)) {
+export function rulesCheck(r, today = todayStr()) {
   const issues = [];
   const add = (severity, field, message) => issues.push({ field, label: field, severity, source: 'rules', message });
   if (r.date > today) add('warn', 'date', `The date ${r.date} is in the future`);
@@ -216,7 +217,7 @@ export function sanitizeFilters(o, scope, knownCategories = []) {
 }
 
 export async function interpretSearch(query, scope, userId) {
-  const today = new Date().toISOString().slice(0, 10);
+  const today = todayStr();
   const rows = scope === 'items'
     ? db.prepare("SELECT category, vendor FROM items").all()
     : db.prepare("SELECT r.category, r.vendor FROM receipts r JOIN projects p ON p.id = r.project_id WHERE p.user_id = ?").all(userId);

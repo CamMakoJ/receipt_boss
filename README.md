@@ -41,6 +41,9 @@ HOST=0.0.0.0 TLS_CERT=... TLS_KEY=... npm start
 | `DATA_DIR` | `./data` | database + images + local backups |
 | `TRUST_PROXY` | – | `1` if behind a reverse proxy that terminates TLS (so cookies get `Secure`) |
 | `RCLONE_BIN` | `rclone` | path to rclone |
+| `AI_BASE_URL` | `http://localhost:11434/v1` | first-run default for Settings → Local AI |
+| `HTTP_OK` | – | `1` silences the plain-HTTP startup warning |
+| `TZ` | `UTC` | first-run default for Settings → General → Time zone |
 
 `npm install` also copies the OCR engine and English model into `public/vendor/tesseract/` (~15 MB, git-ignored; the browser downloads only ~7 MB of it, once, on the first scan and caches it). If that step was skipped, run `node scripts/vendor-ocr.js`; without it the app still works, just without auto-reading.
 
@@ -49,18 +52,20 @@ Open the URL, create the admin account, then add family under **⚙ Settings →
 ## Docker
 
 ```bash
-mkdir -p data rclone certs && sudo chown 1000:1000 data rclone   # the container runs as the unprivileged "node" user (uid 1000)
+mkdir -p data rclone && sudo chown 1000:1000 data rclone   # the container runs as the unprivileged "node" user (uid 1000)
 docker compose up -d --build
 ```
 
-- **Data** lives in `./data` (database, photos, local backups) — that folder is the only thing to protect and back up. Updating is `git pull && docker compose up -d --build`; migrations run on start.
-- **HTTPS:** drop `cert.pem` / `key.pem` in `./certs`, uncomment `TLS_CERT`, `TLS_KEY` and the `./certs` volume in `docker-compose.yml` (for example from `tailscale cert`). Or put Caddy/nginx in front and set `TRUST_PROXY: "1"`.
-- **Google Drive:** rclone is included. Configure it inside the container; the login is saved in `./rclone`:
+Then open `http://<docker-host-ip>:3000` (any address that reaches the host: LAN, NetBird, Tailscale…) and create the admin account.
+
+- **Data** lives in `./data` (database, photos, local backups) — the one folder to protect. Update with `git pull && docker compose up -d --build`; migrations run on start.
+- **Settings in the app** (admin): *General → Time zone* (what "today" means for default dates and reports) and *Local AI → Server address*. `AI_BASE_URL` in the compose file only sets the first-run default for the latter (pre-set to the Docker host's Ollama, `http://host.docker.internal:11434/v1`; `localhost` would mean the container itself).
+- **Plain HTTP:** works for everything except what browsers reserve for HTTPS pages — "install app" and the offline app shell. Taking a photo (the phone's camera picker), cropping, OCR, offline queueing of receipts and syncing all still work. If you want the installable app, terminate TLS in a reverse proxy (`TRUST_PROXY: "1"`) or give the container a certificate (`TLS_CERT`/`TLS_KEY` + the `./certs` volume).
+- **Google Drive:** rclone is included. Configure it inside the container; the login is kept in `./rclone`:
   `docker compose exec -it receipt-boss rclone config` (then `rclone lsd gdrive:` to check).
-- **Local AI** on the Docker host: in Settings → AI use `http://host.docker.internal:11434/v1` (Ollama) or your server's LAN address. `localhost` would mean the container itself.
 - **Restore:** `docker compose stop`, then
-  `docker compose run --rm -v "$PWD/backups-in:/in:ro" receipt-boss node scripts/restore.js /in/<backup file>` (add `RB_BACKUP_PASSPHRASE` with `-e` for encrypted ones), then `docker compose up -d`.
-- Health: the container reports healthy when the server answers; `docker compose ps` shows it.
+  `docker compose run --rm -v "$PWD/backups-in:/in:ro" receipt-boss node scripts/restore.js /in/<backup file>` (add `-e RB_BACKUP_PASSPHRASE=…` for encrypted ones), then `docker compose up -d`.
+- `docker compose ps` shows health; the container reports healthy when the server answers.
 
 ## Local AI (optional)
 

@@ -5,18 +5,16 @@ services:
     container_name: receipt-boss
     restart: unless-stopped
     ports:
-      - "3000:3000"            # change the left number to publish on another port
+      - "3000:3000"            # reachable at http://<docker-host-ip>:3000 — change the left number to use another port
     environment:
-      # HTTPS (needed for phone camera / offline / install). Put PEM files in ./certs
-      # TLS_CERT: /certs/cert.pem
-      # TLS_KEY: /certs/key.pem
-      # Or terminate TLS in a reverse proxy (Caddy/nginx/Traefik) and set:
-      # TRUST_PROXY: "1"
-      TZ: America/Vancouver     # backup schedule / dates use the container's clock
+      HTTP_OK: "1"             # plain HTTP is intended here (silences the startup warning)
+      AI_BASE_URL: http://host.docker.internal:11434/v1   # default for Settings -> Local AI (Ollama on the Docker host); editable in the app
+      # TZ: America/Vancouver  # optional first-run default; the time zone is set in the app under Settings -> General
+      # For HTTPS instead, put PEM files in ./certs and set:  TLS_CERT: /certs/cert.pem  TLS_KEY: /certs/key.pem  (and the ./certs volume)
+      # Behind a TLS-terminating reverse proxy:                TRUST_PROXY: "1"
     volumes:
       - ./data:/data            # database, photos, local backups  (back this folder up!)
       - ./rclone:/config        # rclone config for Google Drive backups
       # - ./certs:/certs:ro
-    # Local AI on the host (e.g. Ollama / LM Studio): use http://host.docker.internal:11434/v1 in Settings -> AI
     extra_hosts:
       - "host.docker.internal:host-gateway"

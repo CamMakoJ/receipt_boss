@@ -32,7 +32,7 @@ function startServer() {
 
   server.listen(port, host, () => {
     console.log(`Receipt Boss on ${scheme}://${host}:${port}   (data: ${DATA_DIR})`);
-    if (scheme === 'http' && !['127.0.0.1', 'localhost', '::1'].includes(host)) {
+    if (scheme === 'http' && !process.env.HTTP_OK && !['127.0.0.1', 'localhost', '::1'].includes(host)) {
       console.warn('WARNING: serving plain HTTP on the network. Phone camera, offline mode and "install app" need HTTPS,');
       console.warn('and passwords/sessions travel unencrypted. Set TLS_CERT and TLS_KEY (see README).');
     }

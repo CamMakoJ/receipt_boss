@@ -141,3 +141,16 @@ test('meta endpoint exposes provinces and categories', async () => {
   assert.ok(m.receipt_categories.includes('Meals'));
   assert.ok(m.item_categories.includes('Appliance'));
 });
+
+test('time zone setting: admin-only, validated, drives server "today"', async () => {
+  const { todayStr, setTz } = await import('../server/tz.js');
+  setTz('Pacific/Kiritimati');           // UTC+14
+  const a = todayStr(new Date('2026-01-01T12:00:00Z')), b = (setTz('Pacific/Pago_Pago'), todayStr(new Date('2026-01-01T12:00:00Z')));
+  assert.equal(a, '2026-01-02'); assert.equal(b, '2026-01-01');
+  setTz('UTC');
+  const c = await adminClient();
+  assert.equal((await c.put('/api/general', { timezone: 'Nope/Zone' })).status, 400);
+  const ok = await c.put('/api/general', { timezone: 'America/Vancouver' });
+  assert.equal(ok.status, 200); assert.equal((await c.get('/api/general')).body.timezone, 'America/Vancouver');
+  setTz('UTC');
+});

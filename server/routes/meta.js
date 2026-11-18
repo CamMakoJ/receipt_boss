@@ -1,8 +1,19 @@
 import { db } from '../db.js';
+import { requireAdmin } from '../auth.js';
+import { err } from '../http.js';
+import { getTz, setTz, isValidTz, timezones, todayStr } from '../tz.js';
 import { buildVendorIndex } from '../../public/vendor.js';
 import { PROVINCES, DEFAULT_PROVINCE, RECEIPT_CATEGORIES, ITEM_CATEGORIES } from '../tax.js';
 
 export function registerMeta(app) {
+  app.get('/api/general', requireAdmin, (req, res) => res.json({ timezone: getTz(), today: todayStr(), timezones: timezones() }));
+  app.put('/api/general', requireAdmin, (req, res) => {
+    const tz = String(req.body?.timezone || '').trim();
+    if (!isValidTz(tz)) throw err(400, 'unknown time zone (use a name like America/Vancouver)');
+    setTz(tz);
+    res.json({ timezone: getTz(), today: todayStr(), timezones: timezones() });
+  });
+
   app.get('/api/meta', (req, res) => res.json({
     provinces: Object.fromEntries(Object.entries(PROVINCES).map(([k, v]) => [k, { name: v.name, gst: v.gst, pst: v.pst, note: v.note }])),
     default_province: DEFAULT_PROVINCE,

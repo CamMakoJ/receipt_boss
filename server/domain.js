@@ -5,6 +5,7 @@ import { err, str, cents, dateStr } from './http.js';
 import { photosOf, photosMap } from './photos.js';
 import { isProvince, calcTax } from './tax.js';
 import { aiReady, aiConfig, parseCheck } from './ai.js';
+import { todayStr } from './tz.js';
 
 export const BILLING = ['unbilled', 'invoiced', 'paid'];
 export const province = (v) => { if (!isProvince(v)) throw err(400, 'invalid province code'); return v; };
@@ -66,7 +67,7 @@ export const projectSummary = (p) => withTotals([p])[0];
 export function receiptFields(b, existing, project) {
   const pick = (k, f) => (b[k] !== undefined ? f(b[k]) : existing?.[k]);
   const f = {
-    date: pick('date', dateStr) ?? new Date().toISOString().slice(0, 10),
+    date: pick('date', dateStr) ?? todayStr(),
     vendor: pick('vendor', (v) => str(v, 200)) ?? '',
     category: pick('category', (v) => str(v, 60)) ?? '',
     description: pick('description', (v) => str(v, 300)) ?? '',

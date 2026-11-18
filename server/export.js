@@ -3,6 +3,7 @@ import { buildZip } from './zip.js';
 import { imageFile } from './http.js';
 import { calcTax } from './tax.js';
 import { total, sumReceipts, money, plain, csvCell, imageName, slug } from './util.js';
+import { todayStr } from './tz.js';
 
 /** On-disk photo files of a receipt, in order (`files` is attached by the export route; `image` is the cover fallback). */
 const filesOf = (r) => (r.files?.length ? r.files : r.image ? [r.image] : []).filter((f) => imageFile(f));
@@ -135,7 +136,7 @@ export function buildPdf(project, receipts, { from, to, invoice } = {}) {
     if (project.client) doc.text(`Client: ${project.client}`);
     if (invoice) doc.text(`Invoice: ${invoice}`);
     const range = from || to ? `${from || 'start'} to ${to || 'present'}` : 'All dates';
-    doc.text(`Period: ${range}   •   Generated ${new Date().toISOString().slice(0, 10)}   •   ${receipts.length} receipt(s)`);
+    doc.text(`Period: ${range}   •   Generated ${todayStr()}   •   ${receipts.length} receipt(s)`);
     if (receipts.some((r) => r.est)) doc.text('* GST/PST estimated from the receipt province\'s standard rates (none was entered).');
     doc.moveDown(1);
 

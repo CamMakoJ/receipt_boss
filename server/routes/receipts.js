@@ -4,6 +4,7 @@ import { err, str, rmImage, imageFile } from '../http.js';
 import { photosOf, ownsPhoto, applyPhotoChanges } from '../photos.js';
 import { enqueueCheck } from '../ai.js';
 import { BILLING, getProject, getReceipt, withPhotos, publicReceipt, full, receiptFields, findDuplicates, duplicateError, needsCheck } from '../domain.js';
+import { todayStr } from '../tz.js';
 
 export function registerReceipts(app) {
   app.post('/api/projects/:id/receipts', (req, res) => {
@@ -57,7 +58,7 @@ export function registerReceipts(app) {
     const { ids, status } = req.body || {};
     if (!BILLING.includes(status)) throw err(400, 'status must be unbilled, invoiced or paid');
     if (!Array.isArray(ids) || !ids.length || ids.length > 5000) throw err(400, 'ids are required');
-    const ref = str(req.body.invoice_ref, 60), today = new Date().toISOString().slice(0, 10);
+    const ref = str(req.body.invoice_ref, 60), today = todayStr();
     const updated = tx(() => {
       let n = 0;
       for (const id of ids) {
@@ -85,7 +86,7 @@ export function registerReceipts(app) {
     }
     const target = b.project_id !== undefined && Number(b.project_id) !== r.project_id ? getProject(b.project_id, req.user) : null; // another of your projects
     const projectId = target ? target.id : r.project_id;
-    const invoicedAt = f.billing_status === 'unbilled' ? null : (r.invoiced_at || new Date().toISOString().slice(0, 10));
+    const invoicedAt = f.billing_status === 'unbilled' ? null : (r.invoiced_at || todayStr());
     const photosChanged = tx(() => {
       let number = r.number;
       if (finalizing || (target && !r.draft)) {                  // real receipts are numbered per project

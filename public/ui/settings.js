@@ -8,7 +8,7 @@ const HEALTH_CLS = { ok: 'ok', warning: '', error: 'bad', off: '' };
 
 export async function viewSettings(section = '') {
   const admin = state.me.role === 'admin';
-  const [users, bk, aiCfg] = admin ? await Promise.all([api('GET', '/users'), api('GET', '/backup'), api('GET', '/ai')]) : [[], null, null];
+  const [users, bk, aiCfg, gen] = admin ? await Promise.all([api('GET', '/users'), api('GET', '/backup'), api('GET', '/ai'), api('GET', '/general')]) : [[], null, null, null];
   const panel = (id, title, ic, body, { open = false } = {}) =>
     `<details class="panel" id="sec-${id}" ${open || section === id ? 'open' : ''}><summary>${icon(ic)} ${title}</summary><div class="panel-body">${body}</div></details>`;
   const theme = getTheme();
@@ -16,6 +16,10 @@ export async function viewSettings(section = '') {
   const appearance = `<div class="field"><span class="lbl">Theme</span>
       <div class="seg" role="group" aria-label="Theme">${[['auto', 'Auto'], ['light', 'Light'], ['dark', 'Dark']].map(([k, l]) => `<button type="button" data-set-theme="${k}" class="${theme === k ? 'on' : ''}">${l}</button>`).join('')}</div>
       <div class="hint">Auto follows your device. This choice is remembered on this device only.</div></div>`;
+
+  const general = admin ? `<form id="genform" class="stack">
+      ${field('Time zone', `<input id="gen-tz" name="timezone" list="tzlist" value="${esc(gen.timezone)}" autocapitalize="none" autocomplete="off"><datalist id="tzlist">${gen.timezones.map((t) => `<option value="${esc(t)}">`).join('')}</datalist>`, { id: 'gen-tz', hint: `Decides what “today” is for default dates and reports. Server date now: ${esc(gen.today)}` })}
+      <div><button class="btn primary">Save</button></div></form>` : '';
 
   const account = `<form id="pw" class="stack">
       ${field('Current password', '<input id="pw-cur" type="password" name="current" autocomplete="current-password" required>', { id: 'pw-cur' })}
@@ -34,7 +38,7 @@ export async function viewSettings(section = '') {
   const aiHtml = admin ? `<p class="muted small">Connect any OpenAI-compatible server on your network (Ollama, LM Studio, llama.cpp, vLLM…). It double-checks new work receipts against the receipt and powers “Ask” search. Requests go only to the address below.</p>
       <form id="aiform" class="stack">
         <label class="check"><input type="checkbox" name="enabled" ${aiCfg.enabled ? 'checked' : ''}> Turn on AI features</label>
-        ${field('Server address', `<input id="ai-url" name="base_url" value="${esc(aiCfg.base_url)}" autocapitalize="none">`, { id: 'ai-url', hint: 'Ollama: http://localhost:11434/v1 · LM Studio: http://localhost:1234/v1' })}
+        ${field('Server address', `<input id="ai-url" name="base_url" value="${esc(aiCfg.base_url)}" autocapitalize="none">`, { id: 'ai-url', hint: 'Ollama: http://localhost:11434/v1 · LM Studio: http://localhost:1234/v1 · in Docker use the host’s address, e.g. http://host.docker.internal:11434/v1' })}
         ${field('Model name', `<input id="ai-model" name="model" list="aimodels" value="${esc(aiCfg.model)}" autocapitalize="none" placeholder="e.g. qwen2.5vl:7b"><datalist id="aimodels"></datalist>`, { id: 'ai-model' })}
         ${field('API key', `<input id="ai-key" name="api_key" type="password" autocomplete="off" placeholder="${aiCfg.has_key ? 'saved — leave blank to keep it' : ''}">`, { id: 'ai-key', hint: '(only if your server needs one)' })}
         ${aiCfg.has_key ? '<label class="check"><input type="checkbox" name="clear_key"> Remove the saved key</label>' : ''}
@@ -68,7 +72,7 @@ export async function viewSettings(section = '') {
   mount(`<div class="page"><h1>Settings</h1>
     ${panel('appearance', 'Appearance', 'sun', appearance, { open: true })}
     ${panel('account', `Account — ${esc(state.me.username)}${admin ? ' · admin' : ''}`, 'user', account)}
-    ${admin ? panel('users', 'Users', 'user', usersHtml) + panel('ai', 'Local AI (optional)', 'sparkles', aiHtml) + panel('backup', 'Backup', 'lock', backupHtml) : ''}
+    ${admin ? panel('general', 'General', 'sliders', general) + panel('users', 'Users', 'user', usersHtml) + panel('ai', 'Local AI (optional)', 'sparkles', aiHtml) + panel('backup', 'Backup', 'lock', backupHtml) : ''}
   </div>`);
   if (section && $(`#sec-${section}`)) $(`#sec-${section}`).scrollIntoView({ block: 'start' });
 
@@ -94,6 +98,8 @@ export async function viewSettings(section = '') {
   $$('[data-rm]').forEach((b) => (b.onclick = refresh(async () => {
     if (await confirmDialog(`Delete ${b.dataset.name} and ALL of their projects and receipts? This cannot be undone.`, { title: 'Delete user?', ok: 'Delete', danger: true })) await api('DELETE', `/users/${b.dataset.rm}`);
   })));
+
+  if (admin) $('#genform').onsubmit = refresh(async (ev) => { ev.preventDefault(); await api('PUT', '/general', { timezone: $('#gen-tz').value }); toast('Time zone saved', 'ok'); });
 
   const aiBody = () => {
     const f = new FormData($('#aiform'));
