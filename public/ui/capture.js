@@ -72,7 +72,7 @@ export async function viewCapture() {
     if (ocr) {
       try {
         const text = await scanCanvas(canvas);                     // the same on-device reader as the forms
-        const f = fieldsFromScan(text, meta.provinces, project.province, today());
+        const f = fieldsFromScan(text, meta.provinces, project.province, today(), [...vmap.values()].map((e) => e.name));
         data = { ...base, ...f.data, ocr_text: text };
         const sug = suggestFor(vmap, data.vendor);                 // history beats the keyword guess
         if (sug?.category) data.category = sug.category;

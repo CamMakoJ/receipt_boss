@@ -82,7 +82,7 @@ export async function viewItemForm({ itemId }) {
   form.vendor.addEventListener('change', applyVendor);
 
   const photo = wirePhoto((text) => {                      // OCR: purchase date, vendor and price (the receipt total)
-    const p = parseReceiptText(text);
+    const p = parseReceiptText(text, { known: vendorList.map((e) => e.name) });
     const price = p.total ?? (p.subtotal !== null ? p.subtotal + (p.gst ?? 0) + (p.pst ?? 0) + (p.tip ?? 0) : null);
     const filled = [];
     if (scanFill(form.vendor, p.vendor)) { filled.push('vendor'); applyVendor(); }

@@ -131,3 +131,18 @@ test('fieldsFromScan: everything quick capture needs in one call', () => {
   assert.deepEqual([bare.data.province, bare.data.subtotal, bare.data.gst, bare.data.tax_auto, bare.estimated], ['ON', 1000, 130, true, true]);
   assert.deepEqual(fieldsFromScan('', provinces, 'AB', TODAY).data, { province: 'AB' });             // nothing readable: just the default province
 });
+
+test('vendor: garbled logo and street line before the real name (real OCR of a diner receipt)', () => {
+  const text = "pe) DINER\nGREGORE DRIVE\nFORT MCMURRAY, AB ToHAKG\n\nMolly's Diner\ni) Gepoxs Lid                708381718\nort McMurray, Alberta\nSal TOH 4K6      SALE\nel: +1 5872750300\nPrinted    ;    Clerk #: 000001\nTotal $25.00";
+  assert.equal(parseReceiptText(text).vendor, "Molly's Diner");
+});
+
+test('vendor: a name from the user\'s history wins, ignoring store numbers and case', () => {
+  const text = 'WELCOME\nHOME DEPOT #7011\n123 Main St\nTOTAL 5.00';
+  assert.equal(parseReceiptText('Garbage ;;\nHOME DEPOT #7011\nTOTAL 5.00', { known: ['Home Depot'] }).vendor, 'Home Depot');
+  assert.equal(parseReceiptText(text).vendor, 'Home Depot');
+});
+
+test('vendor: words like "time"/"table" inside a name no longer disqualify it', () => {
+  assert.equal(parseReceiptText('Lifetime Fitness\nTotal 9.99').vendor, 'Lifetime Fitness');
+});

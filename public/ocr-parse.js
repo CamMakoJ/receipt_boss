@@ -51,21 +51,51 @@ export function findDate(text, today = new Date().toISOString().slice(0, 10)) {
   return null;
 }
 
-const NOT_VENDOR = /receipt|invoice|welcome|thank|customer\s+copy|merchant\s+copy|duplicate|tel\b|phone|www\.|\.com|gst|hst|pst|^\s*#|order\s*#|cashier|server|table|date|time/i;
+const NOT_VENDOR = /receipt|invoice|welcome|thank|customer\s+copy|merchant\s+copy|duplicate|\btel\b|phone|www\.|\.com|\b(gst|hst|pst)\b|^\s*#|order\s*#|\b(cashier|clerk|server|table|date|time|printed|sale|approved|terminal|merchant|guest)\b/i;
 const titleCase = (s) => (s === s.toUpperCase() ? s.toLowerCase().replace(/\b[a-z]/g, (c) => c.toUpperCase()) : s);
 
-const ADDRESS = /^\d{1,6}\s+[A-Za-z]|\b[A-Z]\d[A-Z]\s?\d[A-Z]\d\b|,\s*[A-Z]{2}\b/;
+const ADDRESS = /^\d{1,6}\s+[A-Za-z]|\b[A-Z]\d[A-Z]\s?\d[A-Z]\d\b|,\s*[A-Z]{2}\b/i;
+const STREET = /\b(street|st|avenue|ave|road|rd|drive|dr|blvd|boulevard|highway|hwy|way|crescent|cres|lane|ln|court|ct|trail|place|pl|suite|unit)\.?$/i;
+const CITY_PROV = new RegExp(`,\\s*(${PROVINCE_NAMES.map(([re]) => re.source).join('|')})`, 'i');
+const BUSINESS = /\b(diner|cafe|caf[eé]|restaurant|grill|pub|bar|bistro|kitchen|bakery|deli|pizza|market|mart|store|shop|pharmacy|drugs?|hardware|lumber|supply|supplies|depot|centre|center|motel|hotel|inn|lodge|garage|auto|service|ltd|inc|corp|co\b|company|enterprises?|mechanical|electric|plumbing|rentals?)\b/i;
+const knownKey = (s) => String(s || '').toLowerCase().replace(/#\s*\d+/g, ' ').replace(/[^a-z0-9& ]+/g, ' ').replace(/\s+/g, ' ').trim();
 
-export function findVendor(lines) {
-  for (const raw of lines.slice(0, 8)) {
+/**
+ * The store name. Looks at the first dozen lines and scores them rather than taking the first plausible one:
+ * logos and slogans often OCR to junk, and the street address can come before the name.
+ * `known` = store names already filed by this user (checked first — a line that contains one wins).
+ */
+export function findVendor(lines, known = []) {
+  const cands = [];
+  lines.slice(0, 12).forEach((raw, idx) => {
     // drop store numbers ("#7011") and decoration before judging the line
     const line = raw.replace(/#\s*\d+/g, ' ').replace(/[|_~=*]+/g, ' ').replace(/\s+/g, ' ').trim();
     const letters = (line.match(/[A-Za-z]/g) || []).length;
-    if (line.length < 3 || letters < 3 || letters / line.length < 0.6) continue; // phones/prices are digit-heavy
-    if (NOT_VENDOR.test(line) || ADDRESS.test(line)) continue;
-    return titleCase(line.slice(0, 60));
+    if (line.length < 3 || letters < 3 || letters / line.length < 0.6) return; // phones/prices are digit-heavy
+    if (NOT_VENDOR.test(line) || ADDRESS.test(line) || CITY_PROV.test(line)) return;
+    const business = BUSINESS.test(line), brand = guessCategory(line) !== '';
+    if (STREET.test(line) && !business) return;
+    const garbled = /[^A-Za-z0-9'’&.,\- ]/.test(line) || /(^|\s)[A-Za-z]{1,2}(\s|$)/.test(line) && !business;
+    cands.push({ line, idx, business, brand, garbled });
+  });
+
+  const keys = known.map((n) => [n, knownKey(n)]).filter(([, k]) => k.length >= 4).sort((a, b) => b[1].length - a[1].length);
+  for (const c of cands) {
+    const k = knownKey(c.line);
+    const hit = keys.find(([, nk]) => k === nk || k.includes(nk));
+    if (hit) return hit[0].replace(/\s*#\s*\d+\s*$/, '').trim();
   }
-  return '';
+
+  const words = (s) => (s.toLowerCase().match(/[a-z]{4,}/g) || []);
+  let best = null;
+  for (const c of cands) {
+    const mine = words(c.line);
+    const repeated = mine.some((w) => cands.some((o) => o !== c && words(o.line).includes(w)));   // a name printed twice (logo + text) is the name
+    const mixed = /[a-z]/.test(c.line) && /[A-Z]/.test(c.line);
+    const score = 10 - c.idx * 0.7 + (c.business ? 4 : 0) + (c.brand ? 4 : 0) + (repeated ? 2 : 0) + (mixed ? 2 : 0) - (c.garbled ? 6 : 0);
+    if (!best || score > best.score) best = { ...c, score };
+  }
+  return best ? titleCase(best.line.slice(0, 60)) : '';
 }
 
 const CATEGORY_HINTS = [
@@ -88,9 +118,9 @@ export function guessCategory(text) {
  * Pull labelled amounts out of OCR text. A label with no amount on its own line picks up an amount-only next line.
  * `tax` is a bare "TAX" line (we don't know if it is GST, PST or both).
  */
-export function parseReceiptText(text, { today } = {}) {
+export function parseReceiptText(text, { today, known } = {}) {
   const lines = String(text || '').split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
-  const out = { vendor: findVendor(lines), date: findDate(text || '', today), province: detectProvince(text || ''), category: '',
+  const out = { vendor: findVendor(lines, known), date: findDate(text || '', today), province: detectProvince(text || ''), category: '',
     subtotal: null, gst: null, pst: null, tax: null, tip: null, total: null };
   out.category = guessCategory(`${out.vendor}\n${text}`);
 
@@ -157,8 +187,8 @@ export function resolveAmounts(p, rates) {
  * OCR text -> receipt fields for saving without a form (quick capture). Only fields that were actually found are set.
  * `provinces` is the /api/meta table ({ BC: { gst, pst, ... } }). Returns { data, estimated, inferred, total }.
  */
-export function fieldsFromScan(text, provinces, defaultProvince, today) {
-  const p = parseReceiptText(text, { today });
+export function fieldsFromScan(text, provinces, defaultProvince, today, known) {
+  const p = parseReceiptText(text, { today, known });
   const province = p.province && provinces[p.province] ? p.province : defaultProvince;
   const a = resolveAmounts(p, provinces[province]);
   const readTax = p.gst !== null || p.pst !== null || p.tax !== null;

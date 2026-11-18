@@ -116,7 +116,7 @@ export async function viewReceiptForm({ projectId, receiptId }) {
 
   // ---- OCR result -> form fields
   const applyScan = (text) => {
-    const p = parseReceiptText(text);
+    const p = parseReceiptText(text, { known: vendorList.map((e) => e.name) });
     if (p.province && meta.provinces[p.province]) form.province.value = p.province;
     const a = resolveAmounts(p, meta.provinces[form.province.value]);
     const filled = [];
